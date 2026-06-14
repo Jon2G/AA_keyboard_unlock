@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # DHU validation script for AA Keyboard Unlock module.
-# Prerequisites: rooted device, LSPosed, module enabled + scoped to gearhead.
+# Prerequisites: rooted device, LSPosed, module enabled + scoped to gearhead and maps.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DHU="${DHU:-/Users/jon2g/android/android-sdk/extras/google/auto/desktop-head-unit}"
 CONFIG="${CONFIG:-$ROOT/dhu_config/config_stopped_sensors.ini}"
-APK="$ROOT/app/build/outputs/apk/debug/app-debug.apk"
+APK="$ROOT/src/app/build/outputs/apk/debug/app-debug.apk"
 
 echo "== AA Keyboard Unlock — DHU test matrix =="
 
@@ -20,7 +20,7 @@ adb install -r "$APK"
 
 echo "[2/6] Enabling module via prefs (toggle off by default)..."
 adb shell am start -n com.jon2g.aa_keyboard_unlock/.SettingsActivity >/dev/null 2>&1 || true
-echo "  -> Open AA Keyboard Unlock app and enable the toggle, then enable module in LSPosed for gearhead."
+echo "  -> Open AA Keyboard Unlock app and enable the toggle, then enable module in LSPosed for gearhead + maps."
 
 echo "[3/6] adb forward tcp:5277 tcp:5277"
 adb forward tcp:5277 tcp:5277

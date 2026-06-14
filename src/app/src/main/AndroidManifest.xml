@@ -13,7 +13,7 @@
             android:value="true" />
         <meta-data
             android:name="xposeddescription"
-            android:value="Unlocks Android Auto keyboard by spoofing stopped/parked vehicle state." />
+            android:value="Unlocks Android Auto keyboard (gearhead + Google Maps scope) by spoofing stopped/parked vehicle state." />
         <meta-data
             android:name="xposedminversion"
             android:value="82" />

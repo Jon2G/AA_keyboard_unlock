@@ -96,10 +96,51 @@ jobs:
           name: ${{ steps.version.outputs.apk_name }}
           path: ${{ steps.version.outputs.apk_name }}
 
+      - name: Prepare release notes
+        working-directory: .
+        run: |
+          VERSION="${{ steps.version.outputs.version_name }}"
+          cat > release_body.md <<EOF
+          ## AA Keyboard Unlock v${VERSION}
+
+          LSPosed module that unlocks the Android Auto on-screen keyboard while driving.
+
+          ### Install
+
+          1. Install \`aa-keyboard-unlock-${VERSION}.apk\` on a rooted device with LSPosed
+          2. LSPosed Manager → enable module → scope **Android Auto** and **Google Maps**
+          3. Open **AA Keyboard Unlock** → enable **Unlock keyboard while active**
+          4. Force-stop Android Auto and reconnect to your head unit
+
+          ### Tested with
+
+          - Android Auto \`17.1.662404-release\`
+          - LSPosed API 82
+
+          ### What it unlocks
+
+          - External app text fields (WhatsApp reply, messaging, etc.)
+          - Google Maps Car search bar
+          - Car App SearchTemplate / Voice Plate keyboard hints
+
+          Voice dictation is blocked; the QWERTY keyboard opens instead.
+
+          ### Requirements
+
+          - Rooted device (Magisk or KernelSU) with LSPosed
+          - Android Auto + Google Maps installed
+
+          See [README](https://github.com/${{ github.repository }}/blob/main/README.md) and [CHANGELOG](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for full details.
+
+          ### Safety
+
+          Disabling driving-distraction protections may be illegal in your jurisdiction. Use only when safe and legal. Module defaults to **disabled**.
+          EOF
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag_name }}
           name: v${{ steps.version.outputs.version_name }}
           files: ${{ steps.version.outputs.apk_name }}
-          generate_release_notes: true
+          body_path: release_body.md
