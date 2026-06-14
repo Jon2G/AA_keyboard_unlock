@@ -26,7 +26,7 @@ LSPosed module that keeps the Android Auto on-screen keyboard unlocked by spoofi
    adb install -r app/build/outputs/apk/debug/app-debug.apk
    ```
 
-3. **LSPosed Manager** → Modules → enable **AA Keyboard Unlock** → scope **Android Auto**
+3. **LSPosed Manager** → Modules → enable **AA Keyboard Unlock** → scope **Android Auto** and **Google Maps** (both are recommended)
 
 4. Open **AA Keyboard Unlock** app → enable **Unlock keyboard while active**
 

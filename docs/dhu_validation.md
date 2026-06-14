@@ -31,7 +31,7 @@ Test matrix from the implementation plan. Run after LSPosed module is enabled an
 
 ### Procedure
 
-1. Enable **AA Keyboard Unlock** in LSPosed Manager → scope **Android Auto**
+1. Enable **AA Keyboard Unlock** in LSPosed Manager → scope **Android Auto** and **Google Maps**
 2. Open the module app → enable **Unlock keyboard while active**
 3. Optional: enable **Verbose logging**
 4. Force-stop Android Auto, reconnect DHU

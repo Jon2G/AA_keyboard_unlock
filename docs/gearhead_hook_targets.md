@@ -55,6 +55,18 @@ Sensor type **2** = car speed in m/s (`float[0]`). Feeds `lhi.g()` and `lhu` whe
 
 Sensor hooks can lag behind template init; hook `jtg.b()` and the template/model classes directly to avoid the voice-only race.
 
+### CarUiInfo constraint path (`npz` / `jpm`)
+
+Separate from sensor spoofing (`lht.q()` / `lhl.c`):
+
+- `jpm.a()` → `npz.e()` → `CarUiInfo.b` (touchscreen)
+- `jpm.b()` → `npz.f()` → `CarUiInfo.d` (touchpad navigation)
+- When `jpm.a() || jpm.b()` is true and keyboard is blocked, `gxy.d()` / `jyn` pick `R.string.search_hint_transcription`
+
+**Do not hook `npz.d/e/f` to always return false.** `xdm.e()` uses those flags to pick `xdl` vs `xdu`; if all three are false it returns null and `xcu.c()` NPE-crashes the `:projection` process. Hook `jpm.a/b` instead for hint rewriting.
+
+Maps search bar label is additionally controlled in the **Maps app** via `kur.aJ()` — see [maps_hook_targets.md](maps_hook_targets.md).
+
 ### Maps search uses Voice Plate (not SearchTemplate)
 
 Maps AA search bar does **not** go through `jyn`/`jys`/`gxy` SearchTemplate hooks. Logs show:
@@ -81,11 +93,16 @@ This bypasses Car App SearchTemplate hooks. IME unlock requires both `xdl.d` and
 | **1** | `lhk`, `lhu` | `d(...)` | **beforeHook**: type 2 → `fArr[0]=0`; type 11 → `bArr[0] &= ~2` (concrete `qso` implementors; interface `qso` is not hookable) |
 | **1b** | ~~`qso`~~ | `d(...)` | Interface only — hook concrete classes above |
 | **2** | `lht` | `q()` | **afterHook**: return `true` (keyboard enabled / parked) |
+| **2b** | `lht` | `c()` | **afterHook**: return `lha.b` (CAR_PARKED; unblocks `xcu.h()` external keyboard) |
+| **2c** | `lhi` | `d()` | **afterHook**: return `lha.b` (CAR_PARKED backup from speed provider) |
+| **2d** | `kxk` | `a()` | **afterHook**: return `true` (messaging keyboard path enabled) |
+| **2e** | `jpm` | `a/b()` | **afterHook**: return `false` (used by `gxy`/`jyn` hint selection; safe vs forcing `npz`) |
 | **3** | `lht` | `s()` | **afterHook**: return `false` (wheel speed never non-zero) |
 | **4** | `lhi` | `f()` | **afterHook**: return `0.0f` (reported speed) |
 | **5** | `xdb` | `onStart()` | **afterHook**: set `c = false`, call `d()` so initial lockout cannot stick |
 | **5b** | `xdl`, `xdu` | `d()` | **beforeHook**: always set field `c = false` before UI refresh |
 | **5c** | `xdu` | `k()` | **afterHook**: return `false` (bypass rotary/HWR lockout branch) |
+| **5d** | `xdm` | `e()` | **afterHook**: if null, return new `xdl` (prevents `xcu.c` NPE on invalid input config) |
 | **6** | `jtg` | `b()` | **afterHook**: return `false` (Car App Host keyboard-not-blocked; avoids "Voice only while driving" at template init) |
 | **7** | `jyn`, `jys`, `jyu` | `b(boolean)` / `d(boolean)` | **beforeHook**: force `true` (show keyboard instead of voice-only hint) |
 | **7b** | `jyn`, `jys` | `p(boolean)` | **beforeHook**: force `true` (set hint to keyboard text, not "Voice only while driving") |
@@ -94,11 +111,15 @@ This bypasses Car App SearchTemplate hooks. IME unlock requires both `xdl.d` and
 | **10** | `gan` | constructor | **beforeHook**: `voiceOnlyEnabled = false`, `showKeyboardByDefault = true` |
 | **11** | `lgz` | `a(boolean)` | **beforeHook**: force keyboard-enabled notifications to `true` |
 | **12** | `jtg` | constructor | **afterHook**: force `jtg.g` state to `true`, dispatch refresh event 6 |
+| **12** | `VoicePlateWidget` | constructor + `getPlaceholderText()` | **beforeHook/afterHook**: rewrite voice-only placeholder to keyboard hint |
 | **13** | `hjq` | constructor | **beforeHook**: rewrite voice-only `CarText` placeholder to keyboard hint |
-| **14** | `hjv` | constructor | **beforeHook**: force `transcriptionState` to INACTIVE (keyboard, not voice) |
-| **15** | `kxe` | `ac(VoiceSessionConfig)` | **beforeHook**: block maps voice search when `trigger == 10` |
-| **16** | `kxe` | `aa(MessagingInfo, int)` / `t(MessagingInfo)` | **beforeHook**: entry log; direct reply (type 3) relies on IME unlock |
-| **17** | `kcw` | `k(kvl, int)` | **beforeHook**: entry log for demand-space / voice-plate triggers |
+| **14** | `hjv` | constructor | **beforeHook**: force `transcriptionState` INACTIVE; rewrite voice-only text |
+| **15** | `kxe` | `O(qjr)` | Entry log only; allow demand-space transcription UI (type 6) |
+| **15b** | `kxe` | `ac(VoiceSessionConfig)` | **beforeHook**: block voice/dictation types `{1,3,5}` only; allow type `6` |
+| **16** | `kxe` | `aa(MessagingInfo, int)` | Entry log; reply proceeds with mic blocked via `kwt`/`GhMicrophone` |
+| **17** | `kcw` | `k(kvl, int)` | Entry log for Maps voice-search trigger; keyboard opens via Maps `qhf.l` → `snp.k` |
+| **17b** | `kwt` / `GhMicrophoneContentProvider` | `b()` | **beforeHook**: block microphone capture |
+| **17c** | `xcu` | `h()` | Entry log for external keyboard start |
 
 ### Sensor callback multiplexer (`lhk`)
 
