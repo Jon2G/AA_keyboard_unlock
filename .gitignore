@@ -399,3 +399,25 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+
+# Android / Gradle
+.gradle/
+local.properties
+**/build/
+*.apk
+*.aab
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Reverse-engineering artifacts (regenerate locally)
+re/
+*.apk
+gearhead_src/
+
+# Android signing
+*.keystore
+aa-keyboard-unlock.keystore
+keystore_base64.txt
+signing-credentials.local.txt
+.DS_Store

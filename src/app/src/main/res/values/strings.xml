@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AA Keyboard Unlock</string>
+    <string name="enable_title">Unlock keyboard while active</string>
+    <string name="enable_summary">Spoofs stopped/parked vehicle state in Android Auto</string>
+    <string name="debug_title">Verbose logging</string>
+    <string name="debug_summary">Write hook activity to LSPosed log</string>
+    <string name="scope_hint">Enable this module for Android Auto in LSPosed Manager.</string>
+    <string name="scope_package">Scope: com.google.android.projection.gearhead</string>
+    <string-array name="xposed_scope">
+        <item>com.google.android.projection.gearhead</item>
+    </string-array>
+</resources>

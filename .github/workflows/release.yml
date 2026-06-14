@@ -1,0 +1,105 @@
+name: Release APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: 'Release version (e.g. 1.0.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Decode keystore
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > aa-keyboard-unlock.keystore
+          size=$(stat -c%s aa-keyboard-unlock.keystore 2>/dev/null || stat -f%z aa-keyboard-unlock.keystore)
+          if [ "$size" -lt 100 ]; then
+            echo "aa-keyboard-unlock.keystore is too small ($size bytes). Check ANDROID_KEYSTORE_BASE64 secret."
+            exit 1
+          fi
+          echo "Keystore decoded ($size bytes)"
+
+      - name: Validate signing secrets
+        run: |
+          if [ -z "${{ secrets.ANDROID_SIGNING_PASSWORD }}" ]; then
+            echo "ANDROID_SIGNING_PASSWORD secret is not set."
+            exit 1
+          fi
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Resolve version
+        id: version
+        working-directory: .
+        run: |
+          VERSION_NAME="${{ github.event.inputs.version_name }}"
+
+          IFS='.' read -r MAJOR MINOR PATCH <<< "${VERSION_NAME%%-*}"
+          MAJOR=${MAJOR:-0}
+          MINOR=${MINOR:-0}
+          PATCH=${PATCH:-0}
+          VERSION_CODE=$((MAJOR * 10000 + MINOR * 100 + PATCH))
+
+          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          echo "apk_name=aa-keyboard-unlock-${VERSION_NAME}.apk" >> "$GITHUB_OUTPUT"
+          echo "tag_name=v${VERSION_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Create local.properties
+        run: echo "sdk.dir=${ANDROID_SDK_ROOT}" >> local.properties
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build release APK
+        env:
+          ANDROID_SIGNING_PASSWORD: ${{ secrets.ANDROID_SIGNING_PASSWORD }}
+        run: |
+          ./gradlew assembleRelease \
+            -PversionName="${{ steps.version.outputs.version_name }}" \
+            -PversionCode="${{ steps.version.outputs.version_code }}"
+
+      - name: Rename APK
+        run: |
+          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
+            APK=app/build/outputs/apk/release/app-release.apk
+          else
+            echo "Signed app-release.apk not found; falling back to unsigned."
+            APK=app/build/outputs/apk/release/app-release-unsigned.apk
+          fi
+          cp "$APK" "../${{ steps.version.outputs.apk_name }}"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.version.outputs.apk_name }}
+          path: ${{ steps.version.outputs.apk_name }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag_name }}
+          name: v${{ steps.version.outputs.version_name }}
+          files: ${{ steps.version.outputs.apk_name }}
+          generate_release_notes: true

@@ -1,0 +1,22 @@
+package com.jon2g.aa_keyboard_unlock
+
+import com.jon2g.aa_keyboard_unlock.hooks.GearheadHooks
+import com.jon2g.aa_keyboard_unlock.prefs.ModulePrefs
+import de.robv.android.xposed.IXposedHookLoadPackage
+import de.robv.android.xposed.XposedBridge
+import de.robv.android.xposed.callbacks.XC_LoadPackage
+
+class MainHook : IXposedHookLoadPackage {
+
+    companion object {
+        private const val GEARHEAD_PKG = "com.google.android.projection.gearhead"
+        private const val TAG = "AAKeyboardUnlock"
+    }
+
+    override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
+        if (lpparam.packageName != GEARHEAD_PKG) return
+
+        XposedBridge.log("[$TAG] Loading hooks in $GEARHEAD_PKG")
+        GearheadHooks.install(lpparam)
+    }
+}
