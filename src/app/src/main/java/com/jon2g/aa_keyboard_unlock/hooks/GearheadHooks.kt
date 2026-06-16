@@ -65,7 +65,7 @@ object GearheadHooks {
         hookParkingAndAssistantSettings(lpparam)
         hookCarUiConstraints(lpparam)
         hookCarAppKeyboardGate(lpparam)
-        hookVoicePlateAndAssistant(lpparam)
+        // hookVoicePlateAndAssistant(lpparam) // Disabled to allow voice assistant to function
         log("Hooks installed for ${lpparam.packageName}")
     }
 
@@ -98,7 +98,8 @@ object GearheadHooks {
                 SENSOR_TYPE_DRIVING_STATUS -> {
                     if (bytes.isNotEmpty()) {
                         val original = bytes[0]
-                        val cleared = (original.toInt() and DRIVING_STATUS_KEYBOARD_LOCK_BIT.inv()).toByte()
+                        // Clear all restriction bits so apps like Maps see fully parked state
+                        val cleared = 0.toByte() 
                         if (cleared != original) {
                             debug(
                                 "Spoofing driving status 0x${original.toUByte().toString(16)} -> " +

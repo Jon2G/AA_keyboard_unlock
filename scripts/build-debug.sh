@@ -36,11 +36,16 @@ if [[ ! -x "$GRADLE_DIR/gradlew" ]]; then
 fi
 
 # Prefer Java 21, then 17; avoid Java 26+ which breaks AGP.
-if [[ -z "${JAVA_HOME:-}" ]]; then
+current_java_ver=""
+if [[ -n "${JAVA_HOME:-}" ]]; then
+  current_java_ver=$("$JAVA_HOME/bin/java" -version 2>&1 | awk -F '"' '/version/ {print $2}' | cut -d'.' -f1)
+fi
+
+if [[ -z "${JAVA_HOME:-}" ]] || [[ "$current_java_ver" -ge 22 ]]; then
   if command -v /usr/libexec/java_home >/dev/null 2>&1; then
     for version in 21 17; do
-      if JAVA_HOME="$(/usr/libexec/java_home -v "$version" 2>/dev/null)"; then
-        export JAVA_HOME
+      if new_java_home="$(/usr/libexec/java_home -v "$version" 2>/dev/null)"; then
+        export JAVA_HOME="$new_java_home"
         break
       fi
     done
@@ -76,7 +81,7 @@ fi
 echo "== Building debug APK =="
 (
   cd "$GRADLE_DIR"
-  ./gradlew assembleDebug
+  ./gradlew assembleDebug -PversionName="99.99.99" -PversionCode="99999"
 )
 
 if [[ ! -f "$APK" ]]; then
@@ -95,6 +100,6 @@ if $INSTALL; then
   fi
   echo ""
   echo "Installing on connected device..."
-  adb install -r "$APK"
+  "$ROOT/scripts/install-apk.sh" "$APK"
   echo "Installed com.jon2g.aa_keyboard_unlock (debug)"
 fi

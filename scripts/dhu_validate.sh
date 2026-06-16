@@ -7,6 +7,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DHU="${DHU:-/Users/jon2g/android/android-sdk/extras/google/auto/desktop-head-unit}"
 CONFIG="${CONFIG:-$ROOT/dhu_config/config_stopped_sensors.ini}"
 APK="$ROOT/src/app/build/outputs/apk/debug/app-debug.apk"
+GEARHEAD_PKG="com.google.android.projection.gearhead"
 
 echo "== AA Keyboard Unlock — DHU test matrix =="
 
@@ -15,20 +16,26 @@ if [[ ! -x "$DHU" ]]; then
   exit 1
 fi
 
-echo "[1/6] Installing module APK..."
-adb install -r "$APK"
+echo "[1/7] Building debug APK (versionCode 99999, over release builds)..."
+"$ROOT/scripts/build-debug.sh"
 
-echo "[2/6] Enabling module via prefs (toggle off by default)..."
+echo "[2/7] Installing module APK..."
+"$ROOT/scripts/install-apk.sh" "$APK"
+
+echo "[3/7] Force-stopping Android Auto..."
+adb shell am force-stop "$GEARHEAD_PKG"
+
+echo "[4/7] Enabling module via prefs (toggle off by default)..."
 adb shell am start -n com.jon2g.aa_keyboard_unlock/.SettingsActivity >/dev/null 2>&1 || true
 echo "  -> Open AA Keyboard Unlock app and enable the toggle, then enable module in LSPosed for gearhead + maps."
 
-echo "[3/6] adb forward tcp:5277 tcp:5277"
+echo "[5/7] adb forward tcp:5277 tcp:5277"
 adb forward tcp:5277 tcp:5277
 
-echo "[4/6] Clearing logcat buffer..."
+echo "[6/7] Clearing logcat buffer..."
 adb logcat -c
 
-echo "[5/6] Launch DHU in another terminal:"
+echo "[7/7] Launch DHU in another terminal:"
 echo "  $DHU -c $CONFIG"
 echo ""
 echo "Manual test steps:"
@@ -37,5 +44,5 @@ echo "  B) Module ON  — same DHU moving state                        => keyboa
 echo "  C) Module ON  — speed 0; gear 101; parking_brake true        => keyboard works"
 echo "  D) Toggle module OFF while moving                            => lock returns"
 echo ""
-echo "[6/6] Capture logs (run while testing):"
+echo "Capture logs (run while testing):"
 echo "  adb logcat -s AAKeyboardUnlock:* LSPosed:* | tee $ROOT/re/dhu_validation.log"
