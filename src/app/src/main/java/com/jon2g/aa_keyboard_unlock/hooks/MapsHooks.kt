@@ -1,5 +1,16 @@
 package com.jon2g.aa_keyboard_unlock.hooks
 
+import com.jon2g.aa_keyboard_unlock.xposed.DexHooks
+import com.jon2g.aa_keyboard_unlock.xposed.HookChains
+import com.jon2g.aa_keyboard_unlock.xposed.HookContext
+import com.jon2g.aa_keyboard_unlock.xposed.HookParam
+import com.jon2g.aa_keyboard_unlock.xposed.MethodHook
+import com.jon2g.aa_keyboard_unlock.xposed.MethodReplacement
+import com.jon2g.aa_keyboard_unlock.xposed.Reflect
+import dalvik.system.DexFile
+import io.github.libxposed.api.XposedInterface
+
+
 import android.app.Activity
 import android.app.Application
 import android.content.BroadcastReceiver
@@ -20,15 +31,12 @@ import com.jon2g.aa_keyboard_unlock.MicSignal
 import com.jon2g.aa_keyboard_unlock.ModuleLog
 import com.jon2g.aa_keyboard_unlock.overlay.ProjectedKeyboardOverlay
 import com.jon2g.aa_keyboard_unlock.prefs.ModulePrefs
-import dalvik.system.DexFile
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XC_MethodReplacement
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
-import de.robv.android.xposed.callbacks.XC_LoadPackage
 import java.lang.ref.WeakReference
 
 object MapsHooks {
+    @Volatile
+    private lateinit var xposed: XposedInterface
+
     @Volatile
     private var installedForProcess = false
 
@@ -54,41 +62,41 @@ object MapsHooks {
     @Volatile
     private var mapsClassLoader: ClassLoader? = null
 
-    fun install(lpparam: XC_LoadPackage.LoadPackageParam) {
-        XposedHelpers.findAndHookMethod(
-            "android.app.Application",
-            lpparam.classLoader,
-            "onCreate",
-            object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    if (installedForProcess) return
-                    installedForProcess = true
-                    installHooks(lpparam)
-                    registerMapsKeyboardReceiver(param.thisObject as Application)
-                    registerOverlayDismissOnNavigation(param.thisObject as Application)
-                }
+    fun install(ctx: HookContext) {
+        if (installedForProcess) return
+        installedForProcess = true
+        xposed = ctx.xposed
+        installHooks(ctx)
+        runCatching {
+            val app = Reflect.callStaticMethod(
+                Class.forName("android.app.ActivityThread"),
+                "currentApplication"
+            ) as? Application
+            if (app != null) {
+                registerMapsKeyboardReceiver(app)
+                registerOverlayDismissOnNavigation(app)
             }
-        )
+        }
     }
 
-    private fun installHooks(lpparam: XC_LoadPackage.LoadPackageParam) {
-        mapsClassLoader = lpparam.classLoader
+    private fun installHooks(ctx: HookContext) {
+        mapsClassLoader = ctx.classLoader
         ModuleLog.install(
             ModuleLog.Process.MAPS,
-            "enabled=${ModulePrefs.isEnabled()} debug=${ModulePrefs.isDebug()} pkg=${lpparam.packageName} process=${lpparam.processName}"
+            "enabled=${ModulePrefs.isEnabled()} debug=${ModulePrefs.isDebug()} pkg=${ctx.packageName} process=${ctx.processName}"
         )
-        hookSearchHintResolver(lpparam)
-        hookHeaderUiState(lpparam)
-        hookDistractionState(lpparam)
-        hookMapsCarHostCache(lpparam)
-        hookGmmMicBinder(lpparam)
-        hookPubVoiceSearch(lpparam)
-        hookSearchBarTap(lpparam)
-        hookProjectedKeyboard(lpparam)
-        hookMapsCarTouchIntercept(lpparam)
-        hookMapsVoiceSession(lpparam)
-        hookTrtDrivingFlags(lpparam)
-        ModuleLog.maps("MAPS-INSTALL", "hooks installed for ${lpparam.processName}", always = true)
+        hookSearchHintResolver(ctx)
+        hookHeaderUiState(ctx)
+        hookDistractionState(ctx)
+        hookMapsCarHostCache(ctx)
+        hookGmmMicBinder(ctx)
+        hookPubVoiceSearch(ctx)
+        hookSearchBarTap(ctx)
+        hookProjectedKeyboard(ctx)
+        hookMapsCarTouchIntercept(ctx)
+        hookMapsVoiceSession(ctx)
+        hookTrtDrivingFlags(ctx)
+        ModuleLog.maps("MAPS-INSTALL", "hooks installed for ${ctx.processName}", always = true)
     }
 
     private fun registerMapsKeyboardReceiver(app: Application) {
@@ -221,9 +229,9 @@ object MapsHooks {
      * kur hint resolver — method name obfuscates between Maps builds (aJ may be absent).
      * Match static String methods taking Context + multiple boolean flags.
      */
-    private fun hookSearchHintResolver(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun hookSearchHintResolver(ctx: HookContext) {
         runCatching {
-            val kur = findMapsClass(lpparam.classLoader, "kur")
+            val kur = findMapsClass(ctx.classLoader, "kur")
             val contextClass = android.content.Context::class.java
             val booleanPrimitive = Boolean::class.javaPrimitiveType!!
             var hooked = 0
@@ -233,7 +241,7 @@ object MapsHooks {
                 val params = method.parameterTypes
                 if (params.isEmpty() || params[0] != contextClass) continue
                 if (params.count { it == booleanPrimitive } < 2) continue
-                XposedBridge.hookMethod(method, kurAjHook())
+                HookChains.hookMethod(xposed, method, kurAjHook())
                 if (!kurAjHookLogged) {
                     kurAjHookLogged = true
                     val sig = params.joinToString(",") { it.simpleName }
@@ -249,12 +257,8 @@ object MapsHooks {
         }.onFailure { log("Failed to hook kur hint resolver: ${it.message}") }
 
         runCatching {
-            XposedHelpers.findAndHookMethod(
-                android.content.res.Resources::class.java,
-                "getString",
-                Int::class.javaPrimitiveType!!,
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
+            HookChains.findAndHookMethod(xposed, android.content.res.Resources::class.java, "getString", object : MethodHook() {
+                    override fun afterHookedMethod(param: HookParam) {
                         if (!ModulePrefs.isEnabled()) return
                         val original = param.result as? String ?: return
                         val rewritten = VoicePlateHints.rewriteIfVoiceOnly(original) ?: return
@@ -265,14 +269,13 @@ object MapsHooks {
                             always = true
                         )
                     }
-                }
-            )
+                }, Int::class.javaPrimitiveType!!)
             log("Hooked Maps Resources.getString hint rewrite")
         }.onFailure { log("Failed to hook Maps Resources.getString: ${it.message}") }
     }
 
-    private fun kurAjHook() = object : XC_MethodHook() {
-        override fun beforeHookedMethod(param: MethodHookParam) {
+    private fun kurAjHook() = object : MethodHook() {
+        override fun beforeHookedMethod(param: HookParam) {
             if (!ModulePrefs.isEnabled()) return
             if (param.args.size < 5) return
             debugEntry("kur.aJ() driving=${param.args[1]} keyboardBlocked=${param.args.getOrNull(4)}")
@@ -286,7 +289,7 @@ object MapsHooks {
             }
         }
 
-        override fun afterHookedMethod(param: MethodHookParam) {
+        override fun afterHookedMethod(param: HookParam) {
             if (!ModulePrefs.isEnabled()) return
             val hint = param.result as? String ?: return
             val rewritten = VoicePlateHints.rewriteIfVoiceOnly(hint) ?: return
@@ -300,11 +303,11 @@ object MapsHooks {
     }
 
     /** qha carries isMicRestricted / isKeyboardRestricted used by qhf tap routing. */
-    private fun hookHeaderUiState(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun hookHeaderUiState(ctx: HookContext) {
         runCatching {
-            val qha = findMapsClass(lpparam.classLoader, "qha")
-            XposedBridge.hookAllConstructors(qha, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val qha = findMapsClass(ctx.classLoader, "qha")
+            HookChains.hookAllConstructors(xposed, qha, object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     if (param.args.size < 5) return
                     if (param.args[3] == true) {
@@ -322,11 +325,11 @@ object MapsHooks {
     }
 
     /** qwt DistractionState feeds qwv header — force unrestricted for keyboard path. */
-    private fun hookDistractionState(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun hookDistractionState(ctx: HookContext) {
         runCatching {
-            val qwt = findMapsClass(lpparam.classLoader, "qwt")
-            XposedBridge.hookAllConstructors(qwt, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val qwt = findMapsClass(ctx.classLoader, "qwt")
+            HookChains.hookAllConstructors(xposed, qwt, object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     if (param.args.size < 2) return
                     if (param.args[0] == true) {
@@ -343,29 +346,29 @@ object MapsHooks {
         }.onFailure { log("Failed to hook qwt: ${it.message}") }
     }
 
-    private fun hookMapsCarHostCache(lpparam: XC_LoadPackage.LoadPackageParam) {
-        val cacheHook = object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
+    private fun hookMapsCarHostCache(ctx: HookContext) {
+        val cacheHook = object : MethodHook() {
+            override fun afterHookedMethod(param: HookParam) {
                 if (!ModulePrefs.isEnabled()) return
                 lastMapsCarHost = WeakReference(param.thisObject)
                 ModuleLog.maps(
                     "MAPS-000",
-                    "cached car host ${param.thisObject.javaClass.simpleName}",
+                    "cached car host ${param.thisObject?.javaClass?.simpleName}",
                     always = true
                 )
             }
         }
         for (shortName in listOf("tur", "tvj", "llj", "biph")) {
             runCatching {
-                val clazz = findMapsClass(lpparam.classLoader, shortName)
-                XposedBridge.hookAllMethods(clazz, "onResume", cacheHook)
-                XposedBridge.hookAllMethods(clazz, "onStart", cacheHook)
+                val clazz = findMapsClass(ctx.classLoader, shortName)
+                HookChains.hookAllMethods(xposed, clazz, "onResume", cacheHook)
+                HookChains.hookAllMethods(xposed, clazz, "onStart", cacheHook)
                 log("Hooked ${clazz.simpleName} onResume/onStart host cache")
             }.onFailure { debug("Skip ${shortName} lifecycle: ${it.message}") }
         }
         runCatching {
-            val llj = findMapsClass(lpparam.classLoader, "llj")
-            XposedBridge.hookAllMethods(llj, "c", cacheHook)
+            val llj = findMapsClass(ctx.classLoader, "llj")
+            HookChains.hookAllMethods(xposed, llj, "c", cacheHook)
             log("Hooked llj.c onCreate host cache (${llj.name})")
         }.onFailure { debug("Skip llj.c host cache: ${it.message}") }
     }
@@ -374,9 +377,9 @@ object MapsHooks {
      * Voice search IPC: Bundle gmm_mic=true → lka.z(1) → gearhead kcw.k(10).
      * pub.s() is not always on the call stack; intercept the binder transaction.
      */
-    private fun hookGmmMicBinder(lpparam: XC_LoadPackage.LoadPackageParam) {
-        val gmmMicPassthrough = object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
+    private fun hookGmmMicBinder(ctx: HookContext) {
+        val gmmMicPassthrough = object : MethodHook() {
+            override fun beforeHookedMethod(param: HookParam) {
                 if (!ModulePrefs.isEnabled()) return
                 if (param.args[0] as Int != 1) return
                 if (mapsMicVoiceActive.get() != true) {
@@ -391,8 +394,8 @@ object MapsHooks {
         }
 
         runCatching {
-            XposedBridge.hookAllMethods(android.os.Bundle::class.java, "putBoolean", object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
+            HookChains.hookAllMethods(xposed, android.os.Bundle::class.java, "putBoolean", object : MethodHook() {
+                override fun afterHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     if (param.args[0] == "gmm_mic" && param.args[1] == true) {
                         pendingGmmMic.set(true)
@@ -403,9 +406,9 @@ object MapsHooks {
         }.onFailure { log("Failed to hook Bundle.putBoolean: ${it.message}") }
 
         runCatching {
-            val lkc = findMapsClass(lpparam.classLoader, "lkc")
-            XposedBridge.hookAllMethods(lkc, "f", object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val lkc = findMapsClass(ctx.classLoader, "lkc")
+            HookChains.hookAllMethods(xposed, lkc, "f", object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     if (param.args.size < 2) return
                     val bundle = param.args[1] as? android.os.Bundle ?: return
@@ -419,9 +422,9 @@ object MapsHooks {
         }.onFailure { log("Failed to hook lkc.f: ${it.message}") }
 
         runCatching {
-            val lka = findMapsClass(lpparam.classLoader, "lka")
-            XposedBridge.hookAllMethods(lka, "z", gmmMicPassthrough)
-            XposedBridge.hookAllMethods(lka, "A", gmmMicPassthrough)
+            val lka = findMapsClass(ctx.classLoader, "lka")
+            HookChains.hookAllMethods(xposed, lka, "z", gmmMicPassthrough)
+            HookChains.hookAllMethods(xposed, lka, "A", gmmMicPassthrough)
             log("Hooked lka.z/A gmm_mic mic passthrough (${lka.name})")
         }.onFailure { log("Failed to hook lka.z/A: ${it.message}") }
     }
@@ -429,33 +432,33 @@ object MapsHooks {
     /**
      * pub.s() on tur/tvj is the Maps header mic — always passthrough; notify gearhead before gmm_mic IPC.
      */
-    private fun hookPubVoiceSearch(lpparam: XC_LoadPackage.LoadPackageParam) {
-        val micPassthroughHook = object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
+    private fun hookPubVoiceSearch(ctx: HookContext) {
+        val micPassthroughHook = object : MethodHook() {
+            override fun beforeHookedMethod(param: HookParam) {
                 if (!ModulePrefs.isEnabled()) return
                 mapsMicVoiceActive.set(true)
                 pendingGmmMic.remove()
                 notifyGearheadMapsMicVoice()
                 ModuleLog.maps(
                     "MAPS-MIC-001",
-                    "${param.thisObject.javaClass.simpleName}.s() mic voice allowed",
+                    "${param.thisObject?.javaClass?.simpleName}.s() mic voice allowed",
                     always = true
                 )
             }
 
-            override fun afterHookedMethod(param: MethodHookParam) {
+            override fun afterHookedMethod(param: HookParam) {
                 mapsMicVoiceActive.remove()
             }
         }
 
         var hooked = 0
         runCatching {
-            val pub = findMapsClass(lpparam.classLoader, "pub")
+            val pub = findMapsClass(ctx.classLoader, "pub")
             for (shortName in listOf("tur", "tvj", "rzb", "rzc")) {
                 runCatching {
-                    val clazz = findMapsClass(lpparam.classLoader, shortName)
+                    val clazz = findMapsClass(ctx.classLoader, shortName)
                     if (!pub.isAssignableFrom(clazz)) return@runCatching
-                    XposedBridge.hookAllMethods(clazz, "s", micPassthroughHook)
+                    HookChains.hookAllMethods(xposed, clazz, "s", micPassthroughHook)
                     log("Hooked ${clazz.simpleName}.s (mic passthrough)")
                     hooked++
                 }
@@ -464,8 +467,8 @@ object MapsHooks {
 
         if (hooked == 0) {
             runCatching {
-                val tur = findMapsClass(lpparam.classLoader, "tur")
-                XposedBridge.hookAllMethods(tur, "s", micPassthroughHook)
+                val tur = findMapsClass(ctx.classLoader, "tur")
+                HookChains.hookAllMethods(xposed, tur, "s", micPassthroughHook)
                 log("Hooked tur.s fallback mic passthrough (${tur.name})")
             }.onFailure { log("Failed to hook tur.s fallback: ${it.message}") }
         }
@@ -489,7 +492,7 @@ object MapsHooks {
 
         lastSnp?.get()?.let { snp ->
             runCatching {
-                XposedHelpers.callMethod(snp, "k")
+                Reflect.callMethod(snp, "k")
                 ModuleLog.maps("MAPS-003", "snp.k() invoked directly", always = true)
                 return
             }.onFailure {
@@ -563,13 +566,13 @@ object MapsHooks {
         }
         lastSnp?.get()?.let { snp ->
             runCatching {
-                XposedHelpers.callMethod(snp, "j")
+                Reflect.callMethod(snp, "j")
                 ModuleLog.maps("MAPS-003", "PREPARE — snp.j() on cached snp", always = true)
             }.onFailure {
                 ModuleLog.maps("MAPS-004", "PREPARE snp.j failed: ${it.message}", always = true)
             }
             runCatching {
-                XposedHelpers.callMethod(snp, "k")
+                Reflect.callMethod(snp, "k")
                 ModuleLog.maps("MAPS-003", "PREPARE — snp.k() on cached snp", always = true)
             }.onFailure {
                 ModuleLog.maps("MAPS-004", "PREPARE snp.k failed: ${it.message}", always = true)
@@ -600,12 +603,12 @@ object MapsHooks {
         val qhfClass = runCatching { findMapsClass(classLoader, "qhf") }.getOrNull()
         runCatching {
             val atClass = Class.forName("android.app.ActivityThread")
-            val at = XposedHelpers.callStaticMethod(atClass, "currentActivityThread")
-            val app = XposedHelpers.callStaticMethod(atClass, "currentApplication")
+            val at = Reflect.callStaticMethod(atClass, "currentActivityThread")
+            val app = Reflect.callStaticMethod(atClass, "currentApplication") ?: return@runCatching
             scanForRek(app, rekClass, qhfClass)?.let { return it }
-            val activities = XposedHelpers.getObjectField(at, "mActivities") as? Map<*, *> ?: return null
+            val activities = Reflect.getObjectField(at, "mActivities") as? Map<*, *> ?: return null
             for (record in activities.values) {
-                val activity = XposedHelpers.getObjectField(record, "activity") ?: continue
+                val activity = Reflect.getObjectField(record, "activity") ?: continue
                 scanForRek(activity, rekClass, qhfClass)?.let { rek ->
                     lastRel = WeakReference(rek)
                     ModuleLog.maps(
@@ -626,7 +629,7 @@ object MapsHooks {
         if (rekClass.isInstance(root)) return root
         if (qhfClass != null && qhfClass.isInstance(root)) {
             runCatching {
-                val rek = XposedHelpers.getObjectField(root, "b")
+                val rek = Reflect.getObjectField(root, "b")
                 if (rek != null && rekClass.isInstance(rek)) return rek
             }
         }
@@ -637,7 +640,7 @@ object MapsHooks {
                 val value = field.get(root) ?: return@runCatching
                 if (rekClass.isInstance(value)) return value
                 if (qhfClass != null && qhfClass.isInstance(value)) {
-                    val rek = XposedHelpers.getObjectField(value, "b")
+                    val rek = Reflect.getObjectField(value, "b")
                     if (rek != null && rekClass.isInstance(rek)) return rek
                 }
             }
@@ -657,10 +660,10 @@ object MapsHooks {
     private fun findMapsCarActivity(): Any? {
         runCatching {
             val atClass = Class.forName("android.app.ActivityThread")
-            val at = XposedHelpers.callStaticMethod(atClass, "currentActivityThread")
-            val activities = XposedHelpers.getObjectField(at, "mActivities") as? Map<*, *> ?: return null
+            val at = Reflect.callStaticMethod(atClass, "currentActivityThread")
+            val activities = Reflect.getObjectField(at, "mActivities") as? Map<*, *> ?: return null
             for (record in activities.values) {
-                val activity = XposedHelpers.getObjectField(record, "activity") ?: continue
+                val activity = Reflect.getObjectField(record, "activity") ?: continue
                 val name = activity.javaClass.name
                 if (name.contains("tur") || name.contains("tvj") || name.contains("llj") ||
                     name.contains("biph") || name.contains("GhostActivity") || name.contains("qhf")
@@ -679,35 +682,35 @@ object MapsHooks {
     /**
      * Search bar: qhf.l() → rek.d keyboard. Mic: qhf.k()/i() → pub.s voice (left alone).
      */
-    private fun hookSearchBarTap(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun hookSearchBarTap(ctx: HookContext) {
         runCatching {
-            val qhf = findMapsClass(lpparam.classLoader, "qhf")
-            val blhxDone = runCatching { blhxDone(lpparam) }.getOrNull()
-            val keyboardTap = object : XC_MethodReplacement() {
-                override fun replaceHookedMethod(param: MethodHookParam): Any? {
+            val qhf = findMapsClass(ctx.classLoader, "qhf")
+            val blhxDone = runCatching { blhxDone(ctx) }.getOrNull()
+            val keyboardTap = object : MethodReplacement() {
+                override fun replaceHookedMethod(param: HookParam): Any? {
                     if (!ModulePrefs.isEnabled()) {
-                        return XposedBridge.invokeOriginalMethod(param.method, param.thisObject, param.args)
+                        return HookChains.invokeOriginal(xposed, param)
                     }
                     ModuleLog.maps("MAPS-001", "qhf.l() search tap — opening projected keyboard", always = true)
-                    val rek = XposedHelpers.getObjectField(param.thisObject, "b")
+                    val rek = Reflect.getObjectField(param.thisObject, "b") ?: return blhxDone
                     openProjectedKeyboard(rek)
                     return blhxDone
                 }
             }
-            val micPassthrough = object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val micPassthrough = object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     mapsMicVoiceActive.set(true)
                     ModuleLog.maps("MAPS-MIC-001", "qhf.${param.method.name}() mic voice", always = true)
                 }
 
-                override fun afterHookedMethod(param: MethodHookParam) {
+                override fun afterHookedMethod(param: HookParam) {
                     mapsMicVoiceActive.remove()
                 }
             }
-            XposedBridge.hookAllMethods(qhf, "l", keyboardTap)
+            HookChains.hookAllMethods(xposed, qhf, "l", keyboardTap)
             for (method in listOf("k", "i")) {
-                XposedBridge.hookAllMethods(qhf, method, micPassthrough)
+                HookChains.hookAllMethods(xposed, qhf, method, micPassthrough)
             }
             log("Hooked qhf.l keyboard + qhf.k/i mic (${qhf.name})")
         }.onFailure { log("Failed to hook qhf tap methods: ${it.message}") }
@@ -717,31 +720,31 @@ object MapsHooks {
      * Maps-only voice dictation block (gearhead voice assistant hooks stay disabled).
      * AA search often uses NavAssistantCallbacks gRPC → aoeb.l → voice session, bypassing qhf.
      */
-    private fun hookMapsVoiceSession(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun hookMapsVoiceSession(ctx: HookContext) {
         runCatching {
-            val aoeb = findMapsClass(lpparam.classLoader, "aoeb")
-            XposedHelpers.findAndHookMethod(aoeb, "l", Int::class.javaPrimitiveType, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val aoeb = findMapsClass(ctx.classLoader, "aoeb")
+            HookChains.findAndHookMethod(xposed, aoeb, "l", object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     val trigger = param.args[0] as Int
                     ModuleLog.maps("MAPS-001", "aoeb.l($trigger) blocked — opening projected keyboard", always = true)
                     openFromLastRel()
                     param.result = null
                 }
-            })
+            }, Int::class.javaPrimitiveType!!)
             log("Hooked aoeb.l (${aoeb.name})")
         }.onFailure { log("Failed to hook aoeb.l: ${it.message}") }
 
         runCatching {
-            val aodo = findMapsClass(lpparam.classLoader, "aodo")
-            XposedHelpers.findAndHookMethod(aodo, "m", Int::class.javaPrimitiveType, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val aodo = findMapsClass(ctx.classLoader, "aodo")
+            HookChains.findAndHookMethod(xposed, aodo, "m", object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     ModuleLog.maps("MAPS-001", "aodo.m(${param.args[0]}) blocked voice session", always = true)
                     openFromLastRel()
                     param.result = null
                 }
-            })
+            }, Int::class.javaPrimitiveType!!)
             log("Hooked aodo.m (${aodo.name})")
         }.onFailure { log("Failed to hook aodo.m: ${it.message}") }
     }
@@ -750,9 +753,9 @@ object MapsHooks {
      * Car head-unit touches are injected via [biug.c] into Maps' map [Presentation] (biqv),
      * not into our keyboard [Presentation]. Steer them to the overlay while it is visible.
      */
-    private fun hookMapsCarTouchIntercept(lpparam: XC_LoadPackage.LoadPackageParam) {
-        val intercept = object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
+    private fun hookMapsCarTouchIntercept(ctx: HookContext) {
+        val intercept = object : MethodHook() {
+            override fun beforeHookedMethod(param: HookParam) {
                 if (!ModulePrefs.isEnabled()) return
                 if (!ProjectedKeyboardOverlay.isVisible()) return
                 val motionEvent = param.args[0] as? MotionEvent ?: return
@@ -760,7 +763,7 @@ object MapsHooks {
                     param.result = Pair.create(1, null)
                     ModuleLog.maps(
                         "MAPS-KBD-006",
-                        "car touch steered to keyboard (${param.thisObject.javaClass.simpleName})",
+                        "car touch steered to keyboard (${param.thisObject?.javaClass?.simpleName})",
                         always = true
                     )
                 }
@@ -769,8 +772,8 @@ object MapsHooks {
         var hooked = 0
         for (shortName in listOf("biue", "biui")) {
             runCatching {
-                val clazz = findMapsClass(lpparam.classLoader, shortName)
-                XposedHelpers.findAndHookMethod(clazz, "c", MotionEvent::class.java, intercept)
+                val clazz = findMapsClass(ctx.classLoader, shortName)
+                HookChains.findAndHookMethod(xposed, clazz, "c", intercept, MotionEvent::class.java)
                 log("Hooked $shortName.c car touch intercept (${clazz.name})")
                 hooked++
             }.onFailure { log("Failed to hook $shortName.c touch intercept: ${it.message}") }
@@ -778,17 +781,17 @@ object MapsHooks {
         if (hooked == 0) {
             log("No biug car touch hook installed — overlay taps may pass through")
         }
-        hookGhostActivityTouchFallback(lpparam)
+        hookGhostActivityTouchFallback(ctx)
     }
 
-    private fun hookGhostActivityTouchFallback(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun hookGhostActivityTouchFallback(ctx: HookContext) {
         runCatching {
-            val ghost = XposedHelpers.findClass(
+            val ghost = Reflect.findClass(
                 "com.google.android.apps.auto.client.activity.ghost.GhostActivity",
-                lpparam.classLoader
+                ctx.classLoader
             )
-            XposedHelpers.findAndHookMethod(ghost, "dispatchTouchEvent", MotionEvent::class.java, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            HookChains.findAndHookMethod(xposed, ghost, "dispatchTouchEvent", object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     if (!ProjectedKeyboardOverlay.isVisible()) return
                     val motionEvent = param.args[0] as? MotionEvent ?: return
@@ -796,39 +799,40 @@ object MapsHooks {
                         param.result = true
                     }
                 }
-            })
+            }, MotionEvent::class.java)
             log("Hooked GhostActivity.dispatchTouchEvent fallback")
         }.onFailure { log("Failed to hook GhostActivity touch fallback: ${it.message}") }
     }
 
-    private fun hookProjectedKeyboard(lpparam: XC_LoadPackage.LoadPackageParam) {
-        val rekShowHook = object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
+    private fun hookProjectedKeyboard(ctx: HookContext) {
+        val rekShowHook = object : MethodHook() {
+            override fun beforeHookedMethod(param: HookParam) {
                 if (!ModulePrefs.isEnabled()) return
                 lastRel = WeakReference(param.thisObject)
-                debugEntry("${param.thisObject.javaClass.simpleName}.d() show keyboard overlay")
+                debugEntry("${param.thisObject?.javaClass?.simpleName}.d() show keyboard overlay")
             }
 
-            override fun afterHookedMethod(param: MethodHookParam) {
+            override fun afterHookedMethod(param: HookParam) {
                 if (!ModulePrefs.isEnabled()) return
-                scheduleShowCarIme(param.thisObject)
+                val rel = param.thisObject ?: return
+                scheduleShowCarIme(rel)
             }
         }
 
         runCatching {
-            val rek = findMapsClass(lpparam.classLoader, "rek")
+            val rek = findMapsClass(ctx.classLoader, "rek")
             var hooked = 0
             runCatching {
-                val rel = findMapsClass(lpparam.classLoader, "rel")
-                XposedBridge.hookAllMethods(rel, "d", rekShowHook)
+                val rel = findMapsClass(ctx.classLoader, "rel")
+                HookChains.hookAllMethods(xposed, rel, "d", rekShowHook)
                 log("Hooked rel.d (${rel.name})")
                 hooked++
             }.onFailure { debug("rel.d hook failed: ${it.message}") }
             if (hooked == 0) {
-                hooked = hookRekImplementorsByDex(lpparam, rek, rekShowHook)
+                hooked = hookRekImplementorsByDex(ctx, rek, rekShowHook)
             }
             if (hooked == 0) {
-                hooked = hookKeyboardOverlayBySignature(lpparam, rekShowHook)
+                hooked = hookKeyboardOverlayBySignature(ctx, rekShowHook)
             }
             if (hooked == 0) {
                 log("rek.d overlay hook not found")
@@ -836,16 +840,16 @@ object MapsHooks {
         }.onFailure { log("Failed to hook rek overlay: ${it.message}") }
 
         runCatching {
-            val snp = findMapsClass(lpparam.classLoader, "snp")
-            XposedBridge.hookAllMethods(snp, "k", object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val snp = findMapsClass(ctx.classLoader, "snp")
+            HookChains.hookAllMethods(xposed, snp, "k", object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     lastSnp = WeakReference(param.thisObject)
                     ModuleLog.maps("MAPS-003", "snp.k() show car IME", always = true)
                 }
             })
-            XposedBridge.hookAllMethods(snp, "j", object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            HookChains.hookAllMethods(xposed, snp, "j", object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     lastSnp = WeakReference(param.thisObject)
                     ModuleLog.maps("MAPS-003", "snp.j() bind car input", always = true)
@@ -856,21 +860,21 @@ object MapsHooks {
     }
 
     private fun hookRekImplementorsByDex(
-        lpparam: XC_LoadPackage.LoadPackageParam,
+        ctx: HookContext,
         rek: Class<*>,
-        hook: XC_MethodHook
+        hook: MethodHook
     ): Int {
         var hooked = 0
         runCatching {
-            val dex = DexFile(lpparam.appInfo.sourceDir)
+            val dex = DexFile(ctx.sourcePath)
             val entries = dex.entries()
             while (entries.hasMoreElements()) {
                 val name = entries.nextElement()
                 if (!name.startsWith("defpackage.")) continue
                 runCatching {
-                    val clazz = lpparam.classLoader.loadClass(name)
+                    val clazz = ctx.classLoader.loadClass(name)
                     if (clazz.isInterface || !rek.isAssignableFrom(clazz)) return@runCatching
-                    XposedBridge.hookAllMethods(clazz, "d", hook)
+                    HookChains.hookAllMethods(xposed, clazz, "d", hook)
                     log("Hooked rek.d on ${clazz.name} (dex scan)")
                     hooked++
                 }
@@ -881,18 +885,18 @@ object MapsHooks {
 
     /** rel-like overlay: void d() plus void e(String, cbwl, ccxd) even when rek interface moved. */
     private fun hookKeyboardOverlayBySignature(
-        lpparam: XC_LoadPackage.LoadPackageParam,
-        hook: XC_MethodHook
+        ctx: HookContext,
+        hook: MethodHook
     ): Int {
         var hooked = 0
         runCatching {
-            val dex = DexFile(lpparam.appInfo.sourceDir)
+            val dex = DexFile(ctx.sourcePath)
             val entries = dex.entries()
             while (entries.hasMoreElements()) {
                 val name = entries.nextElement()
                 if (!name.startsWith("defpackage.")) continue
                 runCatching {
-                    val clazz = lpparam.classLoader.loadClass(name)
+                    val clazz = ctx.classLoader.loadClass(name)
                     if (clazz.isInterface) return@runCatching
                     val methods = clazz.declaredMethods
                     val hasShow = methods.any {
@@ -903,7 +907,7 @@ object MapsHooks {
                             it.parameterTypes[0] == String::class.java
                     }
                     if (!hasShow || !hasSubmit) return@runCatching
-                    XposedBridge.hookAllMethods(clazz, "d", hook)
+                    HookChains.hookAllMethods(xposed, clazz, "d", hook)
                     log("Hooked keyboard overlay ${clazz.name} (signature scan)")
                     hooked++
                 }
@@ -913,20 +917,20 @@ object MapsHooks {
     }
 
     /** trt.i() feeds keyboard/driving restriction into header view model. */
-    private fun hookTrtDrivingFlags(lpparam: XC_LoadPackage.LoadPackageParam) {
-        val hook = object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
+    private fun hookTrtDrivingFlags(ctx: HookContext) {
+        val hook = object : MethodHook() {
+            override fun afterHookedMethod(param: HookParam) {
                 if (!ModulePrefs.isEnabled()) return
                 if (param.result == true) {
-                    debug("trt.i() forced false in ${param.thisObject.javaClass.simpleName}")
+                    debug("trt.i() forced false in ${param.thisObject?.javaClass?.simpleName}")
                     param.result = false
                 }
             }
         }
         for (name in listOf("trp", "tro", "trn", "trq", "trk")) {
             runCatching {
-                val clazz = findMapsClass(lpparam.classLoader, name)
-                XposedHelpers.findAndHookMethod(clazz, "i", hook)
+                val clazz = findMapsClass(ctx.classLoader, name)
+                HookChains.findAndHookMethod(xposed, clazz, "i", hook)
                 log("Hooked $name.i (${clazz.name})")
             }.onFailure { debug("Skip $name.i: ${it.message}") }
         }
@@ -947,7 +951,7 @@ object MapsHooks {
         }
         lastRel = WeakReference(rek)
         runCatching {
-            XposedHelpers.callMethod(rek, "d")
+            Reflect.callMethod(rek, "d")
         }.onFailure {
             log("rek.d() failed: ${it.message}")
             return
@@ -967,7 +971,7 @@ object MapsHooks {
         val rek = discoverRekOverlay() ?: lastRel?.get()
         if (rek != null) {
             runCatching {
-                XposedHelpers.callMethod(rek, "e", query, null, null)
+                Reflect.callMethod(rek, "e", query, null, null)
                 ModuleLog.maps("MAPS-KBD-001", "submitted via rek.e", always = true)
                 return
             }.onFailure {
@@ -979,7 +983,7 @@ object MapsHooks {
                 val classLoader = mapsClassLoader ?: throw IllegalStateException("no classloader")
                 val szf = runCatching { findMapsClass(classLoader, "szf") }.getOrNull()
                 val szfValue = szf?.enumConstants?.firstOrNull()
-                XposedHelpers.callMethod(
+                Reflect.callMethod(
                     snp,
                     "b",
                     query,
@@ -1004,7 +1008,7 @@ object MapsHooks {
         val rekRetry = discoverRekOverlay() ?: lastRel?.get()
         if (rekRetry != null) {
             runCatching {
-                XposedHelpers.callMethod(rekRetry, "e", query, null, null)
+                Reflect.callMethod(rekRetry, "e", query, null, null)
                 ModuleLog.maps("MAPS-KBD-001", "submitted via rek.e after PREPARE", always = true)
                 return
             }.onFailure {
@@ -1037,11 +1041,11 @@ object MapsHooks {
             runCatching {
                 val reh = findRehController(rel)
                     ?: throw IllegalStateException("no reh on ${rel.javaClass.name}")
-                XposedHelpers.callMethod(reh, "b")
+                Reflect.callMethod(reh, "b")
                 ModuleLog.maps("MAPS-003", "reh.b() requested car IME", always = true)
             }.onFailure { log("reh.b() failed: ${it.message}") }
         }
-        val anchor = runCatching { XposedHelpers.callMethod(rel, "f") as? View }.getOrNull()
+        val anchor = runCatching { Reflect.callMethod(rel, "f") as? View }.getOrNull()
             ?: runCatching {
                 val field = rel.javaClass.declaredFields.firstOrNull { it.type == View::class.java }
                 field?.isAccessible = true
@@ -1056,7 +1060,7 @@ object MapsHooks {
 
     private fun findRehController(overlay: Any): Any? {
         runCatching {
-            val reh = XposedHelpers.getObjectField(overlay, "c")
+            val reh = Reflect.getObjectField(overlay, "c")
             if (reh != null) return reh
         }
         for (field in overlay.javaClass.declaredFields) {
@@ -1072,15 +1076,16 @@ object MapsHooks {
         return null
     }
 
-    private fun blhxDone(lpparam: XC_LoadPackage.LoadPackageParam): Any {
-        val blhx = findMapsClass(lpparam.classLoader, "blhx")
-        return XposedHelpers.getStaticObjectField(blhx, "a")
+    private fun blhxDone(ctx: HookContext): Any {
+        val blhx = findMapsClass(ctx.classLoader, "blhx")
+        return Reflect.getStaticObjectField(blhx, "a")
+            ?: throw IllegalStateException("blhx.a is null")
     }
 
     private fun findMapsClass(classLoader: ClassLoader, shortName: String): Class<*> {
         for (name in listOf(shortName, "defpackage.$shortName")) {
             runCatching {
-                return XposedHelpers.findClass(name, classLoader)
+                return Reflect.findClass(name, classLoader)
             }
         }
         throw ClassNotFoundException(shortName)

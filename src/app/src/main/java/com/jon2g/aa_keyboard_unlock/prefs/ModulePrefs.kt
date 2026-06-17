@@ -2,9 +2,6 @@ package com.jon2g.aa_keyboard_unlock.prefs
 
 import android.content.Context
 import android.content.SharedPreferences
-import com.jon2g.aa_keyboard_unlock.BuildConfig
-import de.robv.android.xposed.XSharedPreferences
-import de.robv.android.xposed.XposedBridge
 
 object ModulePrefs {
     const val PREFS_NAME = "com.jon2g.aa_keyboard_unlock_prefs"
@@ -16,24 +13,6 @@ object ModulePrefs {
     const val DEFAULT_ENABLED = true
     const val DEFAULT_DEBUG = false
 
-    private const val TAG = "AAKeyboardUnlock"
-
-    private var xPrefs: XSharedPreferences? = null
-    private var providerFallbackLogged = false
-
-    fun initXSharedPreferences() {
-        if (xPrefs == null) {
-            xPrefs = XSharedPreferences(
-                BuildConfig.APPLICATION_ID,
-                PREFS_NAME
-            ).also { it.makeWorldReadable() }
-        }
-    }
-
-    fun reload() {
-        xPrefs?.reload()
-    }
-
     fun isEnabled(): Boolean = readBoolean(ModulePrefsProvider.URI_ENABLED, KEY_ENABLED, DEFAULT_ENABLED)
 
     fun isDebug(): Boolean = readBoolean(ModulePrefsProvider.URI_DEBUG, KEY_DEBUG, DEFAULT_DEBUG)
@@ -42,16 +21,9 @@ object ModulePrefs {
         hookContext()?.let { ctx ->
             runCatching {
                 return ModulePrefsProvider.readBoolean(ctx, uri, default)
-            }.onFailure {
-                if (!providerFallbackLogged) {
-                    providerFallbackLogged = true
-                    XposedBridge.log("[$TAG] ContentProvider read failed, using XSharedPreferences fallback: ${it.message}")
-                }
             }
         }
-        initXSharedPreferences()
-        reload()
-        return xPrefs?.getBoolean(key, default) ?: default
+        return default
     }
 
     private fun hookContext(): Context? {

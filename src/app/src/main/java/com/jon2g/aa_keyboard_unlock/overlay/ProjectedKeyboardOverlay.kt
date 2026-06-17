@@ -24,7 +24,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import com.jon2g.aa_keyboard_unlock.ModuleLog
 import com.jon2g.aa_keyboard_unlock.debug.DisplayDiagnostics
-import de.robv.android.xposed.XposedHelpers
+import com.jon2g.aa_keyboard_unlock.xposed.Reflect
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -803,10 +803,10 @@ object ProjectedKeyboardOverlay {
     private fun findDecorHost(): ViewGroup? {
         runCatching {
             val atClass = Class.forName("android.app.ActivityThread")
-            val at = XposedHelpers.callStaticMethod(atClass, "currentActivityThread")
-            val activities = XposedHelpers.getObjectField(at, "mActivities") as? Map<*, *> ?: return null
+            val at = Reflect.callStaticMethod(atClass, "currentActivityThread")
+            val activities = Reflect.getObjectField(at, "mActivities") as? Map<*, *> ?: return null
             for (record in activities.values) {
-                val activity = XposedHelpers.getObjectField(record, "activity") as? Activity ?: continue
+                val activity = Reflect.getObjectField(record, "activity") as? Activity ?: continue
                 if (activity.isFinishing) continue
                 val decor = activity.window?.decorView as? ViewGroup ?: continue
                 if (decor.windowToken != null) return decor
@@ -819,10 +819,10 @@ object ProjectedKeyboardOverlay {
         findDecorHost()?.windowToken?.let { return it }
         runCatching {
             val atClass = Class.forName("android.app.ActivityThread")
-            val at = XposedHelpers.callStaticMethod(atClass, "currentActivityThread")
-            val activities = XposedHelpers.getObjectField(at, "mActivities") as? Map<*, *> ?: return null
+            val at = Reflect.callStaticMethod(atClass, "currentActivityThread")
+            val activities = Reflect.getObjectField(at, "mActivities") as? Map<*, *> ?: return null
             for (record in activities.values) {
-                val activity = XposedHelpers.getObjectField(record, "activity") as? Activity ?: continue
+                val activity = Reflect.getObjectField(record, "activity") as? Activity ?: continue
                 activity.window?.decorView?.windowToken?.let { return it }
             }
         }

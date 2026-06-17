@@ -21,7 +21,7 @@ When fixes “do nothing,” the hooks may be firing while UI lands on the **wro
 
 ## Phase 0 — Preflight (5 min)
 
-1. **LSPosed scope:**
+1. **LSPosed scope:** LSPosed **2.1+** required (libxposed API 101+). Module should **not** show as legacy in Manager.
    - `com.google.android.projection.gearhead`
    - `com.google.android.apps.maps` — **all processes** (including `:car` if listed)
 
@@ -47,7 +47,7 @@ Wait 3 seconds between actions.
 
 | ID | Action | Proves | Pass log IDs |
 |----|--------|--------|--------------|
-| **A** | Open AA + Maps only | Hooks load | `[GH-INSTALL]`, `[MAPS-INSTALL]` |
+| **A** | Open AA + Maps only | Hooks load | `[MODULE] onModuleLoaded`, `[GH-INSTALL]`, `[MAPS-INSTALL]` |
 | **B** | Tap **search** once | Keyboard chain | `kcw.k(10)`, `MAPS-KBD-003 attach target=tws-Presentation` |
 | **B2** | Type + **Search** on overlay | Submit path | `MAPS-KBD-001 submitted via rek.e` / `snp.b` |
 | **C** | Tap **keyboard icon** (was mic) | Icon rewrite + same path as B | `GH-ICON-001`, then same as B |

@@ -21,6 +21,14 @@ export JAVA_HOME=$(/usr/libexec/java_home -v 21)
 
 Output: `app/build/outputs/apk/debug/app-debug.apk`
 
+## libxposed API 102
+
+The module uses the modern Xposed entry (`META-INF/xposed/java_init.list`, `XposedModule`, API 102). Dependencies:
+
+- `compileOnly("io.github.libxposed:api:102.0.0")` from Maven Central
+
+Hook helpers live in `com.jon2g.aa_keyboard_unlock.xposed` (`HookChains`, `Reflect`, `HookContext`) — no legacy `de.robv.android.xposed` API.
+
 ## Signed release build (local)
 
 Place `aa-keyboard-unlock.keystore` in this directory (gitignored). Password via environment variable or `signing-credentials.local.txt`.

@@ -19,7 +19,7 @@ When the toggle is **off**, all hooks are no-ops — stock Android Auto behavior
 
 ## Prerequisites
 
-- Rooted Android phone with **Magisk** or **KernelSU** and **LSPosed**
+- Rooted Android phone with **Magisk** or **KernelSU** and **LSPosed 2.1+** (libxposed API 101+)
 - Android Auto (`com.google.android.projection.gearhead`) installed
 - Google Maps (`com.google.android.apps.maps`) — required for Maps search bar fix
 - For emulator testing: [Desktop Head Unit (DHU)](docs/setup_DHU.md)
@@ -33,7 +33,7 @@ When the toggle is **off**, all hooks are no-ops — stock Android Auto behavior
    adb install -r aa-keyboard-unlock-1.0.0.apk
    ```
 
-3. **LSPosed Manager** → Modules → enable **AA Keyboard Unlock** → scope **both**:
+3. **LSPosed Manager** → Modules → enable **AA Keyboard Unlock** (should show as a **modern** module, not legacy) → scope **both**:
    - Android Auto (`com.google.android.projection.gearhead`)
    - Google Maps (`com.google.android.apps.maps`) — enable for **all processes** (including `:car` if shown)
 

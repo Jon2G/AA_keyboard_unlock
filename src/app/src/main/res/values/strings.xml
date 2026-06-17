@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">AA Keyboard Unlock</string>
+    <string name="module_description">Unlocks Android Auto keyboard (gearhead + Google Maps scope) by spoofing stopped/parked vehicle state.</string>
     <string name="enable_title">Unlock keyboard while active</string>
     <string name="enable_summary">Spoofs stopped/parked vehicle state in Android Auto</string>
     <string name="debug_title">Verbose logging</string>

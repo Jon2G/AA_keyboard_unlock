@@ -1,12 +1,20 @@
 package com.jon2g.aa_keyboard_unlock
 
+import android.util.Log
 import com.jon2g.aa_keyboard_unlock.prefs.ModulePrefs
-import de.robv.android.xposed.XposedBridge
+import io.github.libxposed.api.XposedInterface
 
 object ModuleLog {
     enum class Process { GH, MAPS }
 
     private const val TAG = "AAKeyboardUnlock"
+
+    @Volatile
+    private var xposed: XposedInterface? = null
+
+    fun bind(interfaceRef: XposedInterface) {
+        xposed = interfaceRef
+    }
 
     fun gearhead(eventId: String, message: String, always: Boolean = false) = log(Process.GH, eventId, message, always)
 
@@ -26,6 +34,7 @@ object ModuleLog {
             Process.GH -> "GH"
             Process.MAPS -> "MAPS"
         }
-        XposedBridge.log("[$TAG v${BuildConfig.VERSION_CODE}] [$prefix] [$eventId] $message")
+        val line = "[$TAG v${BuildConfig.VERSION_CODE}] [$prefix] [$eventId] $message"
+        xposed?.log(Log.INFO, TAG, line) ?: Log.i(TAG, line)
     }
 }

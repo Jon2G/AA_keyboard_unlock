@@ -1,6 +1,6 @@
 package com.jon2g.aa_keyboard_unlock.hooks
 
-import de.robv.android.xposed.XposedHelpers
+import com.jon2g.aa_keyboard_unlock.xposed.Reflect
 
 object VoicePlateHints {
     const val MAPS_HOOK_BANNER = "Type anytime"
@@ -29,19 +29,19 @@ object VoicePlateHints {
         if (value is String) return value
 
         runCatching {
-            val fromCarText = XposedHelpers.callMethod(value, "toCharSequence") as? CharSequence
+            val fromCarText = Reflect.callMethod(value, "toCharSequence") as? CharSequence
             if (!fromCarText.isNullOrEmpty()) return fromCarText.toString()
         }
 
         // gbg → gdo (often gej) → der AnnotatedString
         runCatching {
-            val gdo = XposedHelpers.getObjectField(value, "a") ?: return@runCatching
-            val der = XposedHelpers.getObjectField(gdo, "a")
+            val gdo = Reflect.getObjectField(value, "a") ?: return@runCatching
+            val der = Reflect.getObjectField(gdo, "a")
             if (der != null) {
                 val text = der.toString()
                 if (text.isNotEmpty() && text != "null") return text
             }
-            val fromGdo = XposedHelpers.callMethod(gdo, "toString")?.toString()
+            val fromGdo = Reflect.callMethod(gdo, "toString")?.toString()
             if (!fromGdo.isNullOrEmpty() && fromGdo != "null") return fromGdo
         }
 
@@ -65,7 +65,8 @@ object VoicePlateHints {
     }
 
     fun createCarText(classLoader: ClassLoader, hint: String = MAPS_HOOK_BANNER): Any {
-        val carText = XposedHelpers.findClass("androidx.car.app.model.CarText", classLoader)
-        return XposedHelpers.callStaticMethod(carText, "create", hint)
+        val carText = Reflect.findClass("androidx.car.app.model.CarText", classLoader)
+        return Reflect.callStaticMethod(carText, "create", hint)
+            ?: throw IllegalStateException("CarText.create returned null")
     }
 }

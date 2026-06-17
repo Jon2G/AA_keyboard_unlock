@@ -3,7 +3,7 @@ package com.jon2g.aa_keyboard_unlock.hooks
 import android.content.Context
 import android.graphics.drawable.Drawable
 import com.jon2g.aa_keyboard_unlock.ModuleLog
-import de.robv.android.xposed.XposedHelpers
+import com.jon2g.aa_keyboard_unlock.xposed.Reflect
 
 /**
  * Voice Plate search bar shows a mic [CarIcon] that we route to the projected keyboard.
@@ -56,9 +56,9 @@ object VoicePlateMicIcon {
     private fun createKeyboardCarIcon(classLoader: ClassLoader, context: Context): Any? {
         val gearCtx = resolveGearheadContext(context) ?: return null
         val resId = resolveKeyboardDrawableId(gearCtx)
-        val carIcon = XposedHelpers.findClass("androidx.car.app.model.CarIcon", classLoader)
+        val carIcon = Reflect.findClass("androidx.car.app.model.CarIcon", classLoader)
         return runCatching {
-            XposedHelpers.callStaticMethod(carIcon, "createWithResource", gearCtx, resId)
+            Reflect.callStaticMethod(carIcon, "createWithResource", gearCtx, resId)
         }.getOrNull()?.also {
             ModuleLog.gearhead("GH-ICON-001", "Voice Plate mic -> keyboard CarIcon res=0x${resId.toString(16)}", always = true)
         }
@@ -68,7 +68,7 @@ object VoicePlateMicIcon {
         val drawable = loadKeyboardDrawable(context) ?: return null
         val fyt = findGearheadModelClass(classLoader, "fyt")
         return runCatching {
-            XposedHelpers.newInstance(fyt, drawable, null, null)
+            Reflect.newInstance(fyt, drawable, null, null)
         }.getOrNull()?.also {
             ModuleLog.gearhead("GH-ICON-001", "Voice Plate mic -> keyboard fyt", always = true)
         }
@@ -78,7 +78,7 @@ object VoicePlateMicIcon {
         val drawable = loadKeyboardDrawable(context) ?: return null
         val fyh = findGearheadModelClass(classLoader, "fyh")
         return runCatching {
-            XposedHelpers.newInstance(fyh, drawable, null, null)
+            Reflect.newInstance(fyh, drawable, null, null)
         }.getOrNull()?.also {
             ModuleLog.gearhead("GH-ICON-001", "Voice Plate mic -> keyboard fyh", always = true)
         }
@@ -113,7 +113,7 @@ object VoicePlateMicIcon {
     private fun findGearheadModelClass(classLoader: ClassLoader, shortName: String): Class<*> {
         for (name in listOf(shortName, "defpackage.$shortName")) {
             runCatching {
-                return XposedHelpers.findClass(name, classLoader)
+                return Reflect.findClass(name, classLoader)
             }
         }
         throw ClassNotFoundException(shortName)

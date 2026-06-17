@@ -1,5 +1,15 @@
 package com.jon2g.aa_keyboard_unlock.hooks
 
+import com.jon2g.aa_keyboard_unlock.xposed.DexHooks
+import com.jon2g.aa_keyboard_unlock.xposed.HookChains
+import com.jon2g.aa_keyboard_unlock.xposed.HookContext
+import com.jon2g.aa_keyboard_unlock.xposed.HookParam
+import com.jon2g.aa_keyboard_unlock.xposed.MethodHook
+import com.jon2g.aa_keyboard_unlock.xposed.MethodReplacement
+import com.jon2g.aa_keyboard_unlock.xposed.Reflect
+import io.github.libxposed.api.XposedInterface
+
+
 import android.app.Activity
 import android.app.Application
 import android.app.Service
@@ -19,10 +29,6 @@ import com.jon2g.aa_keyboard_unlock.KeyboardBridge
 import com.jon2g.aa_keyboard_unlock.MicSignal
 import com.jon2g.aa_keyboard_unlock.ModuleLog
 import com.jon2g.aa_keyboard_unlock.prefs.ModulePrefs
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedBridge
-import de.robv.android.xposed.XposedHelpers
-import de.robv.android.xposed.callbacks.XC_LoadPackage
 import java.lang.ref.WeakReference
 import java.lang.reflect.Modifier
 
@@ -66,6 +72,9 @@ object GearheadHooks {
     private const val TRANSCRIPTION_ACTIVE = 2
 
     @Volatile
+    private lateinit var xposed: XposedInterface
+
+    @Volatile
     private var installedForProcess = false
 
     /** Latest SearchTemplate model — used as hgy.c(kkl) fallback for Maps keyboard. */
@@ -80,50 +89,48 @@ object GearheadHooks {
     @Volatile
     private var activeInputFragment: WeakReference<Any>? = null
 
-    fun install(lpparam: XC_LoadPackage.LoadPackageParam) {
-        XposedHelpers.findAndHookMethod(
-            "android.app.Application",
-            lpparam.classLoader,
-            "onCreate",
-            object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    if (installedForProcess) return
-                    installedForProcess = true
-                    installHooks(lpparam)
-                    registerGearheadBridgeReceiver(param.thisObject as Application)
-                }
-            }
-        )
+    fun install(ctx: HookContext) {
+        if (installedForProcess) return
+        installedForProcess = true
+        xposed = ctx.xposed
+        installHooks(ctx)
+        runCatching {
+            val app = Reflect.callStaticMethod(
+                Class.forName("android.app.ActivityThread"),
+                "currentApplication"
+            ) as? Application
+            if (app != null) registerGearheadBridgeReceiver(app)
+        }
     }
 
-    private fun installHooks(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun installHooks(ctx: HookContext) {
         ModuleLog.install(
             ModuleLog.Process.GH,
-            "enabled=${ModulePrefs.isEnabled()} debug=${ModulePrefs.isDebug()} pkg=${lpparam.packageName}"
+            "enabled=${ModulePrefs.isEnabled()} debug=${ModulePrefs.isDebug()} pkg=${ctx.packageName}"
         )
-        hookSensorCallbacks(lpparam, "lhk")
-        hookSensorCallbacks(lpparam, "lhu")
-        hookLocationManager(lpparam)
-        hookInputMethodFragment(lpparam)
-        hookParkingAndAssistantSettings(lpparam)
-        hookCarUiConstraints(lpparam)
-        hookCarAppKeyboardGate(lpparam)
-        hookMapsSearchKeyboard(lpparam)
-        // hookVoicePlateAndAssistant(lpparam) // Disabled to allow voice assistant to function
-        ModuleLog.gearhead("GH-INSTALL", "hooks installed for ${lpparam.packageName}", always = true)
+        hookSensorCallbacks(ctx, "lhk")
+        hookSensorCallbacks(ctx, "lhu")
+        hookLocationManager(ctx)
+        hookInputMethodFragment(ctx)
+        hookParkingAndAssistantSettings(ctx)
+        hookCarUiConstraints(ctx)
+        hookCarAppKeyboardGate(ctx)
+        hookMapsSearchKeyboard(ctx)
+        // hookVoicePlateAndAssistant(ctx) // Disabled to allow voice assistant to function
+        ModuleLog.gearhead("GH-INSTALL", "hooks installed for ${ctx.packageName}", always = true)
     }
 
     private fun findGearheadClass(classLoader: ClassLoader, shortName: String): Class<*> {
         for (name in listOf(shortName, "defpackage.$shortName")) {
             runCatching {
-                return XposedHelpers.findClass(name, classLoader)
+                return Reflect.findClass(name, classLoader)
             }
         }
         throw ClassNotFoundException(shortName)
     }
 
-    private val sensorSpoofHook = object : XC_MethodHook() {
-        override fun beforeHookedMethod(param: MethodHookParam) {
+    private val sensorSpoofHook = object : MethodHook() {
+        override fun beforeHookedMethod(param: HookParam) {
             if (!ModulePrefs.isEnabled()) return
             val args = param.args ?: return
             if (args.size < 4) return
@@ -157,25 +164,25 @@ object GearheadHooks {
         }
     }
 
-    private fun hookSensorCallbacks(lpparam: XC_LoadPackage.LoadPackageParam, shortName: String) {
+    private fun hookSensorCallbacks(ctx: HookContext, shortName: String) {
         runCatching {
-            val clazz = findGearheadClass(lpparam.classLoader, shortName)
+            val clazz = findGearheadClass(ctx.classLoader, shortName)
             if (clazz.isInterface || Modifier.isAbstract(clazz.modifiers)) {
                 log("Skipping $shortName.d (abstract/interface; use concrete implementor)")
                 return
             }
-            XposedBridge.hookAllMethods(clazz, "d", sensorSpoofHook)
+            HookChains.hookAllMethods(xposed, clazz, "d", sensorSpoofHook)
             log("Hooked $shortName.d (${clazz.name})")
         }.onFailure { log("Failed to hook $shortName.d: ${it.message}") }
     }
 
-    private fun hookLocationManager(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun hookLocationManager(ctx: HookContext) {
         runCatching {
-            val lht = findGearheadClass(lpparam.classLoader, "lht")
+            val lht = findGearheadClass(ctx.classLoader, "lht")
 
             // kzr.d().q() — isKeyboardEnabled (parking / keyboard allowed)
-            XposedHelpers.findAndHookMethod(lht, "q", object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
+            HookChains.findAndHookMethod(xposed, lht, "q", object : MethodHook() {
+                override fun afterHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     if (param.result != true) {
                         debug("lht.q() forced true (was ${param.result})")
@@ -184,8 +191,8 @@ object GearheadHooks {
                 }
             })
             // kzr.d().s() — wheel speed was non-zero
-            XposedHelpers.findAndHookMethod(lht, "s", object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
+            HookChains.findAndHookMethod(xposed, lht, "s", object : MethodHook() {
+                override fun afterHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     if (param.result != false) {
                         debug("lht.s() forced false (was ${param.result})")
@@ -197,9 +204,9 @@ object GearheadHooks {
         }.onFailure { log("Failed to hook lht: ${it.message}") }
 
         runCatching {
-            val lhi = findGearheadClass(lpparam.classLoader, "lhi")
-            XposedHelpers.findAndHookMethod(lhi, "f", object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
+            val lhi = findGearheadClass(ctx.classLoader, "lhi")
+            HookChains.findAndHookMethod(xposed, lhi, "f", object : MethodHook() {
+                override fun afterHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     val speed = param.result as? Float ?: return
                     if (speed != 0f) {
@@ -212,14 +219,14 @@ object GearheadHooks {
         }.onFailure { log("Failed to hook lhi.f: ${it.message}") }
     }
 
-    private fun hookCarAppKeyboardGate(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun hookCarAppKeyboardGate(ctx: HookContext) {
         runCatching {
-            val jtg = findGearheadClass(lpparam.classLoader, "jtg")
-            XposedHelpers.findAndHookMethod(jtg, "b", object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val jtg = findGearheadClass(ctx.classLoader, "jtg")
+            HookChains.findAndHookMethod(xposed, jtg, "b", object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     debugEntry("jtg.b()")
                 }
-                override fun afterHookedMethod(param: MethodHookParam) {
+                override fun afterHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     if (param.result != false) {
                         debug("jtg.b() forced false (keyboard allowed, was ${param.result})")
@@ -227,15 +234,15 @@ object GearheadHooks {
                     }
                 }
             })
-            XposedBridge.hookAllConstructors(jtg, object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
+            HookChains.hookAllConstructors(xposed, jtg, object : MethodHook() {
+                override fun afterHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     runCatching {
-                        val component = XposedHelpers.getObjectField(param.thisObject, "a")
-                        val state = XposedHelpers.getObjectField(param.thisObject, "g")
-                        XposedHelpers.callMethod(state, "d", true)
-                        val gij = XposedHelpers.getObjectField(param.thisObject, "h")
-                        XposedHelpers.callMethod(gij, "a", 6)
+                        val component = Reflect.getObjectField(param.thisObject, "a")
+                        val state = Reflect.getObjectField(param.thisObject, "g")
+                        Reflect.callMethod(state, "d", true)
+                        val gij = Reflect.getObjectField(param.thisObject, "h")
+                        Reflect.callMethod(gij, "a", 6)
                         debug("jtg init: keyboard state forced true for $component, refresh dispatched")
                     }.onFailure { debug("jtg init refresh failed: ${it.message}") }
                 }
@@ -243,34 +250,34 @@ object GearheadHooks {
             log("Hooked jtg.b() + constructors (${jtg.name})")
         }.onFailure { log("Failed to hook jtg: ${it.message}") }
 
-        hookTemplateKeyboardMethod(lpparam, "jyn", "b", Boolean::class.javaPrimitiveType!!)
-        hookTemplateKeyboardMethod(lpparam, "jys", "b", Boolean::class.javaPrimitiveType!!)
-        hookTemplateKeyboardMethod(lpparam, "jyu", "d", Boolean::class.javaPrimitiveType!!)
-        hookTemplateHintMethod(lpparam, "jyn", "p", Boolean::class.javaPrimitiveType!!)
-        hookTemplateHintMethod(lpparam, "jys", "p", Boolean::class.javaPrimitiveType!!)
+        hookTemplateKeyboardMethod(ctx, "jyn", "b", Boolean::class.javaPrimitiveType!!)
+        hookTemplateKeyboardMethod(ctx, "jys", "b", Boolean::class.javaPrimitiveType!!)
+        hookTemplateKeyboardMethod(ctx, "jyu", "d", Boolean::class.javaPrimitiveType!!)
+        hookTemplateHintMethod(ctx, "jyn", "p", Boolean::class.javaPrimitiveType!!)
+        hookTemplateHintMethod(ctx, "jys", "p", Boolean::class.javaPrimitiveType!!)
 
         runCatching {
-            val lgz = findGearheadClass(lpparam.classLoader, "lgz")
-            hookLgzImplementors(lpparam, lgz, "lht")
-            hookLgzImplementors(lpparam, lgz, "jtg")
-            hookLgzImplementors(lpparam, lgz, "lhl")
+            val lgz = findGearheadClass(ctx.classLoader, "lgz")
+            hookLgzImplementors(ctx, lgz, "lht")
+            hookLgzImplementors(ctx, lgz, "jtg")
+            hookLgzImplementors(ctx, lgz, "lhl")
             log("Hooked lgz.a implementors")
         }.onFailure { log("Failed to hook lgz.a: ${it.message}") }
 
         runCatching {
-            val gxy = findGearheadClass(lpparam.classLoader, "gxy")
-            XposedBridge.hookAllConstructors(gxy, object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
+            val gxy = findGearheadClass(ctx.classLoader, "gxy")
+            HookChains.hookAllConstructors(xposed, gxy, object : MethodHook() {
+                override fun afterHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     lastSearchGxy = WeakReference(param.thisObject)
                     ModuleLog.gearhead("GH-MAPS-000", "cached gxy SearchTemplate", always = true)
                 }
             })
-            val gyb = findGearheadClass(lpparam.classLoader, "gyb")
-            val hgx = findGearheadClass(lpparam.classLoader, "hgx")
-            val gbh = findGearheadClass(lpparam.classLoader, "gbh")
-            XposedHelpers.findAndHookMethod(gxy, "d", gyb, Boolean::class.javaPrimitiveType!!, hgx, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val gyb = findGearheadClass(ctx.classLoader, "gyb")
+            val hgx = findGearheadClass(ctx.classLoader, "hgx")
+            val gbh = findGearheadClass(ctx.classLoader, "gbh")
+            HookChains.findAndHookMethod(xposed, gxy, "d", object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     debugEntry("gxy.d()")
                     if (!ModulePrefs.isEnabled()) return
                     if (param.args[1] == false) {
@@ -279,18 +286,18 @@ object GearheadHooks {
                     }
                 }
 
-                override fun afterHookedMethod(param: MethodHookParam) {
+                override fun afterHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
-                    patchSearchTemplateHint(param.result, gbh, lpparam.classLoader)
+                    patchSearchTemplateHint(param.result, gbh, ctx.classLoader)
                 }
-            })
+            }, gyb, Boolean::class.javaPrimitiveType!!, hgx)
             log("Hooked gxy.d (${gxy.name})")
         }.onFailure { log("Failed to hook gxy.d: ${it.message}") }
 
         runCatching {
-            val gxz = findGearheadClass(lpparam.classLoader, "gxz")
-            XposedBridge.hookAllConstructors(gxz, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val gxz = findGearheadClass(ctx.classLoader, "gxz")
+            HookChains.hookAllConstructors(xposed, gxz, object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     if (param.args.size >= 2 && param.args[1] != true) {
                         debug("gxz isKeyboardAllowed forced true (was ${param.args[1]})")
@@ -302,9 +309,9 @@ object GearheadHooks {
         }.onFailure { log("Failed to hook gxz: ${it.message}") }
 
         runCatching {
-            val gan = findGearheadClass(lpparam.classLoader, "gan")
-            XposedBridge.hookAllConstructors(gan, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val gan = findGearheadClass(ctx.classLoader, "gan")
+            HookChains.hookAllConstructors(xposed, gan, object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     if (param.args.size >= 9) {
                         if (param.args[8] != false || param.args[2] != true) {
@@ -319,13 +326,13 @@ object GearheadHooks {
         }.onFailure { log("Failed to hook gan: ${it.message}") }
     }
 
-    private fun hookParkingAndAssistantSettings(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun hookParkingAndAssistantSettings(ctx: HookContext) {
         runCatching {
-            val lht = findGearheadClass(lpparam.classLoader, "lht")
-            val lha = findGearheadClass(lpparam.classLoader, "lha")
-            val carParked = XposedHelpers.getStaticObjectField(lha, LHA_FIELD_CAR_PARKED)
-            XposedHelpers.findAndHookMethod(lht, "c", object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
+            val lht = findGearheadClass(ctx.classLoader, "lht")
+            val lha = findGearheadClass(ctx.classLoader, "lha")
+            val carParked = Reflect.getStaticObjectField(lha, LHA_FIELD_CAR_PARKED)
+            HookChains.findAndHookMethod(xposed, lht, "c", object : MethodHook() {
+                override fun afterHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     if (param.result != carParked) {
                         debug("lht.c() forced CAR_PARKED (was ${param.result})")
@@ -337,11 +344,11 @@ object GearheadHooks {
         }.onFailure { log("Failed to hook lht.c: ${it.message}") }
 
         runCatching {
-            val lhi = findGearheadClass(lpparam.classLoader, "lhi")
-            val lha = findGearheadClass(lpparam.classLoader, "lha")
-            val carParked = XposedHelpers.getStaticObjectField(lha, LHA_FIELD_CAR_PARKED)
-            XposedHelpers.findAndHookMethod(lhi, "d", object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
+            val lhi = findGearheadClass(ctx.classLoader, "lhi")
+            val lha = findGearheadClass(ctx.classLoader, "lha")
+            val carParked = Reflect.getStaticObjectField(lha, LHA_FIELD_CAR_PARKED)
+            HookChains.findAndHookMethod(xposed, lhi, "d", object : MethodHook() {
+                override fun afterHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     if (param.result != carParked) {
                         debug("lhi.d() forced CAR_PARKED (was ${param.result})")
@@ -353,9 +360,9 @@ object GearheadHooks {
         }.onFailure { log("Failed to hook lhi.d: ${it.message}") }
 
         runCatching {
-            val kxk = findGearheadClass(lpparam.classLoader, "kxk")
-            XposedHelpers.findAndHookMethod(kxk, "a", object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
+            val kxk = findGearheadClass(ctx.classLoader, "kxk")
+            HookChains.findAndHookMethod(xposed, kxk, "a", object : MethodHook() {
+                override fun afterHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     if (param.result != true) {
                         debug("kxk.a() forced true (keyboard enabled, was ${param.result})")
@@ -368,15 +375,15 @@ object GearheadHooks {
     }
 
     /** jpm CarUiInfo hint path — do NOT force npz.d/e/f false (breaks xdm.e() IME selection). */
-    private fun hookCarUiConstraints(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun hookCarUiConstraints(ctx: HookContext) {
         runCatching {
-            val jpm = findGearheadClass(lpparam.classLoader, "jpm")
+            val jpm = findGearheadClass(ctx.classLoader, "jpm")
             for (method in listOf("a", "b")) {
-                XposedHelpers.findAndHookMethod(jpm, method, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
+                HookChains.findAndHookMethod(xposed, jpm, method, object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
                         debugEntry("jpm.$method()")
                     }
-                    override fun afterHookedMethod(param: MethodHookParam) {
+                    override fun afterHookedMethod(param: HookParam) {
                         if (!ModulePrefs.isEnabled()) return
                         if (param.result == true) {
                             debug("jpm.$method() forced false (was true)")
@@ -389,11 +396,11 @@ object GearheadHooks {
         }.onFailure { log("Failed to hook jpm: ${it.message}") }
     }
 
-    private fun hookVoiceMicCapture(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun hookVoiceMicCapture(ctx: HookContext) {
         runCatching {
-            val kwt = findGearheadClass(lpparam.classLoader, "kwt")
-            XposedHelpers.findAndHookMethod(kwt, "b", object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val kwt = findGearheadClass(ctx.classLoader, "kwt")
+            HookChains.findAndHookMethod(xposed, kwt, "b", object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     debug("kwt.b() blocked voice mic capture")
                     param.result = null
@@ -403,12 +410,12 @@ object GearheadHooks {
         }.onFailure { log("Failed to hook kwt.b: ${it.message}") }
 
         runCatching {
-            val micProvider = XposedHelpers.findClass(
+            val micProvider = Reflect.findClass(
                 "com.google.android.apps.auto.components.demand.audio.GhMicrophoneContentProvider",
-                lpparam.classLoader
+                ctx.classLoader
             )
-            XposedHelpers.findAndHookMethod(micProvider, "b", object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            HookChains.findAndHookMethod(xposed, micProvider, "b", object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     debug("GhMicrophoneContentProvider.b() blocked")
                     param.result = null
@@ -422,32 +429,27 @@ object GearheadHooks {
      * Maps AA search tap → DemandClientService → kcw.k(trigger=10) → voice / transcription.
      * Block gearhead demand-space voice; Maps process opens projected IME via rek.d (MapsHooks).
      */
-    private fun hookMapsSearchKeyboard(lpparam: XC_LoadPackage.LoadPackageParam) {
-        hookVoicePlateWidget(lpparam)
-        hookHintStringRewrites(lpparam)
-        hookComposeMicDrawableSwap(lpparam)
-        hookProjectedImeCache(lpparam)
-        hookMapsVoiceSessionBlock(lpparam)
-        hookMapsDemandSpaceVoiceBlock(lpparam)
-        hookMapsDemandSpaceScrimBlock(lpparam)
-        hookCarAppMicDictation(lpparam)
-        hookDemandClientMicBypass(lpparam)
-        hookDismissKeyboardOnAaLayoutChange(lpparam)
+    private fun hookMapsSearchKeyboard(ctx: HookContext) {
+        hookVoicePlateWidget(ctx)
+        hookHintStringRewrites(ctx)
+        hookComposeMicDrawableSwap(ctx)
+        hookProjectedImeCache(ctx)
+        hookMapsVoiceSessionBlock(ctx)
+        hookMapsDemandSpaceVoiceBlock(ctx)
+        hookMapsDemandSpaceScrimBlock(ctx)
+        hookCarAppMicDictation(ctx)
+        hookDemandClientMicBypass(ctx)
+        hookDismissKeyboardOnAaLayoutChange(ctx)
 
         runCatching {
-            val kvl = findGearheadClass(lpparam.classLoader, "kvl")
-            val kcw = findGearheadClass(lpparam.classLoader, "kcw")
-            XposedHelpers.findAndHookMethod(
-                kcw,
-                "k",
-                kvl,
-                Int::class.javaPrimitiveType!!,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
+            val kvl = findGearheadClass(ctx.classLoader, "kvl")
+            val kcw = findGearheadClass(ctx.classLoader, "kcw")
+            HookChains.findAndHookMethod(xposed, kcw, "k", object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
                         if (!ModulePrefs.isEnabled()) return
                         val trigger = param.args[1] as Int
                         if (trigger != VOICE_SEARCH_TRIGGER_MAPS) return
-                        val gearCtx = resolveGearheadContext(lpparam.classLoader)
+                        val gearCtx = resolveGearheadContext(ctx.classLoader)
                         if (gearCtx != null && MicSignal.isMapsMicActive(gearCtx)) {
                             mapsMicFromMapsHeaderUntilMs = System.currentTimeMillis() + 4000L
                             debugEntry("kcw.k() trigger=$trigger — mic passthrough (MicSignal)")
@@ -459,18 +461,18 @@ object GearheadHooks {
                         }
                         debugEntry("kcw.k() trigger=$trigger — keyboard path (skip demand open)")
                         markMapsSearchVoiceBlock()
-                        closeMapsVoiceDemand(lpparam.classLoader)
-                        requestPrepareMapsKeyboardBroadcast(lpparam.classLoader)
+                        closeMapsVoiceDemand(ctx.classLoader)
+                        requestPrepareMapsKeyboardBroadcast(ctx.classLoader)
                         param.result = null
                     }
 
-                    override fun afterHookedMethod(param: MethodHookParam) {
+                    override fun afterHookedMethod(param: HookParam) {
                         if (!ModulePrefs.isEnabled()) return
                         val trigger = param.args[1] as Int
                         if (trigger != VOICE_SEARCH_TRIGGER_MAPS) return
                         if (inMapsMicFromHeader()) return
                         if (param.hasThrowable()) return
-                        val classLoader = lpparam.classLoader
+                        val classLoader = ctx.classLoader
                         runOnMainThread {
                             Handler(Looper.getMainLooper()).postDelayed({
                                 if (inMapsMicFromHeader() || micDictationActive) {
@@ -486,58 +488,45 @@ object GearheadHooks {
                             }, 300L)
                         }
                     }
-                }
-            )
+                }, kvl, Int::class.javaPrimitiveType!!)
             log("Hooked kcw.k Maps surgical intercept (${kcw.name})")
         }.onFailure { log("Failed to hook kcw.k Maps intercept: ${it.message}") }
     }
 
     /** Close Maps overlay when AA layout changes or Maps leaves the Voice Plate template. */
-    private fun hookDismissKeyboardOnAaLayoutChange(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun hookDismissKeyboardOnAaLayoutChange(ctx: HookContext) {
         runCatching {
-            XposedHelpers.findAndHookMethod(
-                Activity::class.java,
-                "onConfigurationChanged",
-                Configuration::class.java,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
+            HookChains.findAndHookMethod(xposed, Activity::class.java, "onConfigurationChanged", object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
                         if (!ModulePrefs.isEnabled()) return
-                        requestCloseMapsKeyboardBroadcast(lpparam.classLoader)
+                        requestCloseMapsKeyboardBroadcast(ctx.classLoader)
                     }
-                }
-            )
+                }, Configuration::class.java)
             log("Hooked Activity.onConfigurationChanged keyboard dismiss")
         }.onFailure { log("Failed to hook onConfigurationChanged dismiss: ${it.message}") }
 
         runCatching {
-            val voicePlateWidget = XposedHelpers.findClass(
+            val voicePlateWidget = Reflect.findClass(
                 "com.android.car.libraries.apphost.external.model.widgets.VoicePlateWidget",
-                lpparam.classLoader
+                ctx.classLoader
             )
-            val jpf = findGearheadClass(lpparam.classLoader, "jpf")
+            val jpf = findGearheadClass(ctx.classLoader, "jpf")
             val componentName = android.content.ComponentName::class.java
-            val sessionInfo = XposedHelpers.findClass("androidx.car.app.SessionInfo", lpparam.classLoader)
-            val templateWrapper = XposedHelpers.findClass("androidx.car.app.model.TemplateWrapper", lpparam.classLoader)
-            XposedHelpers.findAndHookMethod(
-                jpf,
-                "a",
-                componentName,
-                sessionInfo,
-                templateWrapper,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
+            val sessionInfo = Reflect.findClass("androidx.car.app.SessionInfo", ctx.classLoader)
+            val templateWrapper = Reflect.findClass("androidx.car.app.model.TemplateWrapper", ctx.classLoader)
+            HookChains.findAndHookMethod(xposed, jpf, "a", object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
                         if (!ModulePrefs.isEnabled()) return
                         val component = param.args[0] as? android.content.ComponentName ?: return
                         if (component.packageName != "com.google.android.apps.maps") return
                         val wrapper = param.args[2] ?: return
                         val template = runCatching {
-                            XposedHelpers.callMethod(wrapper, "getTemplate")
+                            Reflect.callMethod(wrapper, "getTemplate")
                         }.getOrNull() ?: return
                         if (voicePlateWidget.isInstance(template)) return
-                        requestCloseMapsKeyboardBroadcast(lpparam.classLoader)
+                        requestCloseMapsKeyboardBroadcast(ctx.classLoader)
                     }
-                }
-            )
+                }, componentName, sessionInfo, templateWrapper)
             log("Hooked jpf.a Maps template navigation dismiss (${jpf.name})")
         }.onFailure { log("Failed to hook jpf.a navigation dismiss: ${it.message}") }
     }
@@ -551,11 +540,11 @@ object GearheadHooks {
     }
 
     /** Block gray demand-space scrim (qib.p) on Maps search tap; mic paths still open demand space. */
-    private fun hookMapsDemandSpaceScrimBlock(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun hookMapsDemandSpaceScrimBlock(ctx: HookContext) {
         runCatching {
-            val qib = findGearheadClass(lpparam.classLoader, "qib")
-            XposedHelpers.findAndHookMethod(qib, "p", object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val qib = findGearheadClass(ctx.classLoader, "qib")
+            HookChains.findAndHookMethod(xposed, qib, "p", object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     if (micDictationActive || inMapsMicFromHeader()) return
                     if (!inMapsSearchVoiceBlock()) return
@@ -572,19 +561,13 @@ object GearheadHooks {
     }
 
     /** Voice Plate / SearchTemplate compose hardcodes gs_mic_vd_theme_24 via daf.A — swap at load time. */
-    private fun hookComposeMicDrawableSwap(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun hookComposeMicDrawableSwap(ctx: HookContext) {
         runCatching {
-            val daf = findGearheadClass(lpparam.classLoader, "daf")
-            val buq = findGearheadClass(lpparam.classLoader, "buq")
+            val daf = findGearheadClass(ctx.classLoader, "daf")
+            val buq = findGearheadClass(ctx.classLoader, "buq")
             val keyboardId = VoicePlateMicIcon.RES_KEYBOARD_BLACK
-            XposedHelpers.findAndHookMethod(
-                daf,
-                "A",
-                Int::class.javaPrimitiveType!!,
-                buq,
-                Int::class.javaPrimitiveType!!,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
+            HookChains.findAndHookMethod(xposed, daf, "A", object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
                         if (!ModulePrefs.isEnabled()) return
                         val resId = param.args[0] as Int
                         if (resId != VoicePlateMicIcon.RES_MIC_THEME) return
@@ -595,55 +578,49 @@ object GearheadHooks {
                             always = true
                         )
                     }
-                }
-            )
+                }, Int::class.javaPrimitiveType!!, buq, Int::class.javaPrimitiveType!!)
             log("Hooked daf.A compose mic icon swap (${daf.name})")
         }.onFailure { log("Failed to hook daf.A mic swap: ${it.message}") }
     }
 
-    private fun hookMapsDemandSpaceVoiceBlock(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun hookMapsDemandSpaceVoiceBlock(ctx: HookContext) {
         runCatching {
-            val qib = findGearheadClass(lpparam.classLoader, "qib")
-            XposedHelpers.findAndHookMethod(qib, "l", Int::class.javaPrimitiveType!!, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val qib = findGearheadClass(ctx.classLoader, "qib")
+            HookChains.findAndHookMethod(xposed, qib, "l", object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     if (param.args[0] as Int != VOICE_SEARCH_TRIGGER_MAPS) return
                     micDictationActive = true
                     runCatching {
                         val atClass = Class.forName("android.app.ActivityThread")
-                        val app = XposedHelpers.callStaticMethod(atClass, "currentApplication") as? Context
+                        val app = Reflect.callStaticMethod(atClass, "currentApplication") as? Context
                         if (app != null) MicSignal.signalMapsMicVoice(app)
                     }
                     ModuleLog.gearhead("GH-MIC-001", "qib.l(10) mic transcription allowed", always = true)
                 }
 
-                override fun afterHookedMethod(param: MethodHookParam) {
+                override fun afterHookedMethod(param: HookParam) {
                     micDictationActive = false
                 }
-            })
+            }, Int::class.javaPrimitiveType!!)
             log("Hooked qib.l mic passthrough (${qib.name})")
         }.onFailure { log("Failed to hook qib.l mic passthrough: ${it.message}") }
     }
 
     /** gmm_transcription_request bundle → qib.l (mic), not kcw.k (search). */
-    private fun hookDemandClientMicBypass(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun hookDemandClientMicBypass(ctx: HookContext) {
         runCatching {
-            val demandService = XposedHelpers.findClass(
+            val demandService = Reflect.findClass(
                 "com.google.android.gearhead.demand.DemandClientService",
-                lpparam.classLoader
+                ctx.classLoader
             )
-            XposedHelpers.findAndHookMethod(
-                demandService,
-                "b",
-                android.os.Bundle::class.java,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
+            HookChains.findAndHookMethod(xposed, demandService, "b", object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
                         if (!ModulePrefs.isEnabled()) return
                         val bundle = param.args[0] as? android.os.Bundle ?: return
-                        signalMapsMicFromDemandBundle(lpparam.classLoader, bundle, param.thisObject as? Context)
+                        signalMapsMicFromDemandBundle(ctx.classLoader, bundle, param.thisObject as? Context)
                     }
-                }
-            )
+                }, android.os.Bundle::class.java)
             log("Hooked DemandClientService.b mic detection")
         }.onFailure { log("Failed to hook DemandClientService.b: ${it.message}") }
     }
@@ -687,7 +664,7 @@ object GearheadHooks {
         if (System.currentTimeMillis() < mapsMicFromMapsHeaderUntilMs) return true
         val ctx = runCatching {
             val atClass = Class.forName("android.app.ActivityThread")
-            XposedHelpers.callStaticMethod(atClass, "currentApplication") as? Context
+            Reflect.callStaticMethod(atClass, "currentApplication") as? Context
         }.getOrNull()
         return ctx != null && MicSignal.isMapsMicActive(ctx)
     }
@@ -696,54 +673,54 @@ object GearheadHooks {
      * Mic icon on SearchTemplate: gan.onTriggerTranscription → hgy.c(kkl) → jxa dictation.
      * Search bar uses kcw.k(10) instead — leave mic path untouched.
      */
-    private fun hookCarAppMicDictation(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun hookCarAppMicDictation(ctx: HookContext) {
         runCatching {
-            val jwz = findGearheadClass(lpparam.classLoader, "jwz")
-            val kkl = findGearheadClass(lpparam.classLoader, "kkl")
-            XposedHelpers.findAndHookMethod(jwz, "c", kkl, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val jwz = findGearheadClass(ctx.classLoader, "jwz")
+            val kkl = findGearheadClass(ctx.classLoader, "kkl")
+            HookChains.findAndHookMethod(xposed, jwz, "c", object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     micDictationActive = true
                     runCatching {
                         val atClass = Class.forName("android.app.ActivityThread")
-                        val app = XposedHelpers.callStaticMethod(atClass, "currentApplication") as? Context
+                        val app = Reflect.callStaticMethod(atClass, "currentApplication") as? Context
                         if (app != null) MicSignal.signalMapsMicVoice(app)
                     }
                     ModuleLog.gearhead("GH-MIC-001", "hgy.c(kkl) mic dictation allowed", always = true)
                 }
 
-                override fun afterHookedMethod(param: MethodHookParam) {
+                override fun afterHookedMethod(param: HookParam) {
                     micDictationActive = false
                 }
-            })
+            }, kkl)
             log("Hooked jwz.c mic dictation passthrough (${jwz.name})")
         }.onFailure { log("Failed to hook jwz.c mic passthrough: ${it.message}") }
     }
 
-    private fun hookProjectedImeCache(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun hookProjectedImeCache(ctx: HookContext) {
         runCatching {
-            val carRegionId = XposedHelpers.findClass(
+            val carRegionId = Reflect.findClass(
                 "com.google.android.gms.car.display.CarRegionId",
-                lpparam.classLoader
+                ctx.classLoader
             )
             val editorInfo = android.view.inputmethod.EditorInfo::class.java
-            val xcu = findGearheadClass(lpparam.classLoader, "xcu")
-            XposedHelpers.findAndHookMethod(xcu, "c", editorInfo, carRegionId, object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
+            val xcu = findGearheadClass(ctx.classLoader, "xcu")
+            HookChains.findAndHookMethod(xposed, xcu, "c", object : MethodHook() {
+                override fun afterHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     activeImeService = WeakReference(param.thisObject)
                     ModuleLog.gearhead(
                         "GH-MAPS-000",
-                        "cached active IME service (${param.thisObject.javaClass.simpleName})",
+                        "cached active IME service (${param.thisObject?.javaClass?.simpleName})",
                         always = true
                     )
                 }
-            })
+            }, editorInfo, carRegionId)
             log("Hooked xcu.c IME cache (${xcu.name})")
         }.onFailure { log("Failed to hook xcu.c IME cache: ${it.message}") }
     }
 
-    private fun hookMapsVoiceSessionBlock(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun hookMapsVoiceSessionBlock(ctx: HookContext) {
         val mapsVoiceTypes = setOf(
             VOICE_SESSION_TYPE_VOICE,
             VOICE_SESSION_TYPE_DIRECT_REPLY,
@@ -752,9 +729,9 @@ object GearheadHooks {
         )
 
         runCatching {
-            val kxe = findGearheadClass(lpparam.classLoader, "kxe")
-            XposedHelpers.findAndHookMethod(kxe, "F", Int::class.javaPrimitiveType!!, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val kxe = findGearheadClass(ctx.classLoader, "kxe")
+            HookChains.findAndHookMethod(xposed, kxe, "F", object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     val trigger = param.args[0] as Int
                     if (trigger != VOICE_SEARCH_TRIGGER_MAPS) return
@@ -770,15 +747,15 @@ object GearheadHooks {
                     )
                     param.result = null
                 }
-            })
+            }, Int::class.javaPrimitiveType!!)
             log("Hooked kxe.F Maps voice block (${kxe.name})")
         }.onFailure { log("Failed to hook kxe.F Maps voice block: ${it.message}") }
 
         runCatching {
-            val kxe = findGearheadClass(lpparam.classLoader, "kxe")
+            val kxe = findGearheadClass(ctx.classLoader, "kxe")
             val bundle = android.os.Bundle::class.java
-            XposedHelpers.findAndHookMethod(kxe, "G", Int::class.javaPrimitiveType!!, bundle, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            HookChains.findAndHookMethod(xposed, kxe, "G", object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     val trigger = param.args[0] as Int
                     if (trigger != VOICE_SEARCH_TRIGGER_MAPS) return
@@ -786,15 +763,15 @@ object GearheadHooks {
                     ModuleLog.gearhead("GH-MAPS-001", "kxe.G($trigger) blocked Maps voice session", always = true)
                     param.result = null
                 }
-            })
+            }, Int::class.javaPrimitiveType!!, bundle)
             log("Hooked kxe.G Maps voice block (${kxe.name})")
         }.onFailure { log("Failed to hook kxe.G Maps voice block: ${it.message}") }
 
         runCatching {
-            val kxe = findGearheadClass(lpparam.classLoader, "kxe")
-            val qjr = findGearheadClass(lpparam.classLoader, "qjr")
-            XposedHelpers.findAndHookMethod(kxe, "O", qjr, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val kxe = findGearheadClass(ctx.classLoader, "kxe")
+            val qjr = findGearheadClass(ctx.classLoader, "qjr")
+            HookChains.findAndHookMethod(xposed, kxe, "O", object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     if (!inMapsSearchVoiceBlock()) return
                     if (micDictationActive) return
@@ -807,22 +784,22 @@ object GearheadHooks {
                     )
                     param.result = null
                 }
-            })
+            }, qjr)
             log("Hooked kxe.O Maps transcription block (${kxe.name})")
         }.onFailure { log("Failed to hook kxe.O Maps block: ${it.message}") }
 
         runCatching {
-            val kxe = findGearheadClass(lpparam.classLoader, "kxe")
-            val voiceSessionConfig = XposedHelpers.findClass(
+            val kxe = findGearheadClass(ctx.classLoader, "kxe")
+            val voiceSessionConfig = Reflect.findClass(
                 "com.google.android.gearhead.sdk.assistant.VoiceSessionConfig",
-                lpparam.classLoader
+                ctx.classLoader
             )
-            XposedHelpers.findAndHookMethod(kxe, "ac", voiceSessionConfig, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            HookChains.findAndHookMethod(xposed, kxe, "ac", object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     val config = param.args[0] ?: return
-                    val sessionType = XposedHelpers.getIntField(config, "a")
-                    val trigger = XposedHelpers.getIntField(config, "f")
+                    val sessionType = Reflect.getIntField(config, "a")
+                    val trigger = Reflect.getIntField(config, "f")
                     debugEntry("kxe.ac() type=$sessionType trigger=$trigger")
                     val mapsTapBlock = inMapsSearchVoiceBlock()
                     if (micDictationActive || inMapsMicFromHeader()) return
@@ -843,12 +820,12 @@ object GearheadHooks {
                     }
                 }
 
-                override fun afterHookedMethod(param: MethodHookParam) {
+                override fun afterHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     if (param.throwable != null) return
                     val config = param.args[0] ?: return
-                    val sessionType = XposedHelpers.getIntField(config, "a")
-                    val trigger = XposedHelpers.getIntField(config, "f")
+                    val sessionType = Reflect.getIntField(config, "a")
+                    val trigger = Reflect.getIntField(config, "f")
                     if (trigger == VOICE_SEARCH_TRIGGER_MAPS && sessionType in mapsVoiceTypes) return
                     if (sessionType == VOICE_SESSION_TYPE_START_TRANSCRIPTION) {
                         ModuleLog.gearhead(
@@ -858,7 +835,7 @@ object GearheadHooks {
                         )
                     }
                 }
-            })
+            }, voiceSessionConfig)
             log("Hooked kxe.ac Maps voice block (${kxe.name})")
         }.onFailure { log("Failed to hook kxe.ac Maps voice block: ${it.message}") }
     }
@@ -885,7 +862,7 @@ object GearheadHooks {
         if (!stockVerified) {
             openKxeQwertyDirect(classLoader)
             lastSearchGxy?.get()?.let { gxy ->
-                val hgy = XposedHelpers.getObjectField(gxy, "d")
+                val hgy = Reflect.getObjectField(gxy, "d")
                 if (hgy != null) openCarAppQwertyKeyboard(hgy, classLoader)
             } ?: ModuleLog.gearhead("GH-MAPS-004", "no cached gxy in this gearhead process", always = true)
             sendMapsKeyboardBroadcast(classLoader, KeyboardBridge.ACTION_OPEN_MAPS_KEYBOARD, "OPEN_MAPS_KEYBOARD")
@@ -906,10 +883,10 @@ object GearheadHooks {
     private fun closeMapsVoiceDemand(classLoader: ClassLoader) {
         runCatching {
             val kcw = findGearheadClass(classLoader, "kcw")
-            val controller = XposedHelpers.callStaticMethod(kcw, "l")
+            val controller = Reflect.callStaticMethod(kcw, "l")
             val ywj = findGearheadClass(classLoader, "ywj")
-            val interrupted = XposedHelpers.getStaticObjectField(ywj, "INTERRUPTED")
-            XposedHelpers.callMethod(controller, "n", interrupted)
+            val interrupted = Reflect.getStaticObjectField(ywj, "INTERRUPTED")
+            Reflect.callMethod(controller, "n", interrupted)
             ModuleLog.gearhead("GH-MAPS-003", "closed demand-space voice for keyboard overlay", always = true)
         }.onFailure {
             ModuleLog.gearhead("GH-MAPS-004", "close demand voice failed: ${it.message}", always = true)
@@ -919,12 +896,12 @@ object GearheadHooks {
     private fun resolveGearheadContext(classLoader: ClassLoader): Context? {
         return runCatching {
             val kcw = findGearheadClass(classLoader, "kcw")
-            val controller = XposedHelpers.callStaticMethod(kcw, "l")
-            XposedHelpers.getObjectField(controller, "d") as Context
+            val controller = Reflect.callStaticMethod(kcw, "l")
+            Reflect.getObjectField(controller, "d") as Context
         }.getOrNull() ?: runCatching {
             val atClass = Class.forName("android.app.ActivityThread")
-            val at = XposedHelpers.callStaticMethod(atClass, "currentActivityThread")
-            XposedHelpers.callStaticMethod(atClass, "currentApplication") as Context
+            val at = Reflect.callStaticMethod(atClass, "currentActivityThread")
+            Reflect.callStaticMethod(atClass, "currentApplication") as Context
         }.getOrNull()
     }
 
@@ -932,7 +909,8 @@ object GearheadHooks {
     private fun openKxeQwertyDirect(classLoader: ClassLoader): Boolean {
         return runCatching {
             val kcw = findGearheadClass(classLoader, "kcw")
-            val kxe = XposedHelpers.callStaticMethod(kcw, "l")
+            val kxe = Reflect.callStaticMethod(kcw, "l")
+                ?: throw IllegalStateException("kcw.l() returned null")
             val view = findGearheadInputView(kxe) ?: throw IllegalStateException("no gearhead input view")
             val editorInfo = EditorInfo().apply {
                 packageName = "com.google.android.apps.maps"
@@ -941,10 +919,10 @@ object GearheadHooks {
             val connection = view.onCreateInputConnection(editorInfo)
                 ?: BaseInputConnection(view, true)
             val qjoClass = findGearheadClass(classLoader, "qjo")
-            val callback = XposedHelpers.newInstance(qjoClass, connection, Runnable {})
+            val callback = Reflect.newInstance(qjoClass, connection, Runnable {})
             markMapsSearchVoiceBlock()
             ModuleLog.gearhead("GH-MAPS-002", "attempt kxe.O(qjo) direct QWERTY", always = true)
-            XposedHelpers.callMethod(kxe, "O", callback)
+            Reflect.callMethod(kxe, "O", callback)
             ModuleLog.gearhead("GH-MAPS-003", "kxe.O(qjo) invoked", always = true)
             true
         }.getOrElse {
@@ -959,15 +937,15 @@ object GearheadHooks {
 
     private fun findGearheadInputView(kxe: Any): View? {
         runCatching {
-            val context = XposedHelpers.getObjectField(kxe, "d") as? Context
+            val context = Reflect.getObjectField(kxe, "d") as? Context
             (context as? Activity)?.window?.decorView?.let { return it }
         }
         runCatching {
             val atClass = Class.forName("android.app.ActivityThread")
-            val at = XposedHelpers.callStaticMethod(atClass, "currentActivityThread")
-            val activities = XposedHelpers.getObjectField(at, "mActivities") as? Map<*, *> ?: return null
+            val at = Reflect.callStaticMethod(atClass, "currentActivityThread")
+            val activities = Reflect.getObjectField(at, "mActivities") as? Map<*, *> ?: return null
             for (record in activities.values) {
-                val activity = XposedHelpers.getObjectField(record, "activity") as? Activity ?: continue
+                val activity = Reflect.getObjectField(record, "activity") as? Activity ?: continue
                 activity.window?.decorView?.let { return it }
             }
         }
@@ -981,7 +959,7 @@ object GearheadHooks {
 
     /** hgy.a(InputConnection) → kxe.O(qjo) — real QWERTY, not jxa dictation. */
     private fun openCarAppQwertyKeyboard(hgy: Any, classLoader: ClassLoader): Boolean {
-        if (XposedHelpers.callMethod(hgy, "b") != true) {
+        if (Reflect.callMethod(hgy, "b") != true) {
             ModuleLog.gearhead("GH-MAPS-004", "hgy.b() false — Car App keyboard gated", always = true)
             return false
         }
@@ -999,13 +977,13 @@ object GearheadHooks {
             val refresh = Runnable {
                 runCatching {
                     lastSearchGxy?.get()?.let { gxy ->
-                        XposedHelpers.callMethod(gxy, "f")
+                        Reflect.callMethod(gxy, "f")
                     }
                 }
             }
             markMapsSearchVoiceBlock()
             ModuleLog.gearhead("GH-MAPS-002", "attempt hgy.a(qjo) Car App QWERTY", always = true)
-            XposedHelpers.callMethod(hgy, "a", connection, refresh)
+            Reflect.callMethod(hgy, "a", connection, refresh)
             ModuleLog.gearhead("GH-MAPS-003", "hgy.a(qjo) invoked", always = true)
             true
         }.getOrElse {
@@ -1020,9 +998,9 @@ object GearheadHooks {
 
     private fun findCarAppHostView(gxy: Any?): View? {
         if (gxy == null) return null
-        val gdi = XposedHelpers.getObjectField(gxy, "b") ?: return null
+        val gdi = Reflect.getObjectField(gxy, "b") ?: return null
         runCatching {
-            val ctx = XposedHelpers.callMethod(gdi, "a") as? Context
+            val ctx = Reflect.callMethod(gdi, "a") as? Context
             val activity = ctx as? Activity
             val decor = activity?.window?.decorView
             if (decor != null) return decor
@@ -1047,8 +1025,8 @@ object GearheadHooks {
     private fun sendMapsKeyboardBroadcast(classLoader: ClassLoader, action: String, label: String): Boolean {
         return runCatching {
             val kcw = findGearheadClass(classLoader, "kcw")
-            val controller = XposedHelpers.callStaticMethod(kcw, "l")
-            val context = XposedHelpers.getObjectField(controller, "d") as Context
+            val controller = Reflect.callStaticMethod(kcw, "l")
+            val context = Reflect.getObjectField(controller, "d") as Context
             val intent = Intent(action).setPackage("com.google.android.apps.maps")
             context.sendBroadcast(intent)
             ModuleLog.gearhead("GH-MAPS-002", "broadcast $label to Maps", always = true)
@@ -1083,10 +1061,10 @@ object GearheadHooks {
         return runCatching {
             val xcuClass = findGearheadClass(classLoader, "xcu")
             val atClass = Class.forName("android.app.ActivityThread")
-            val at = XposedHelpers.callStaticMethod(atClass, "currentActivityThread")
-            val services = XposedHelpers.getObjectField(at, "mServices") as? Map<*, *> ?: return null
+            val at = Reflect.callStaticMethod(atClass, "currentActivityThread")
+            val services = Reflect.getObjectField(at, "mServices") as? Map<*, *> ?: return null
             for (record in services.values) {
-                val service = XposedHelpers.getObjectField(record, "service") ?: continue
+                val service = Reflect.getObjectField(record, "service") ?: continue
                 if (xcuClass.isInstance(service)) {
                     ModuleLog.gearhead(
                         "GH-MAPS-000",
@@ -1105,7 +1083,7 @@ object GearheadHooks {
         return runCatching {
             ModuleLog.gearhead("GH-MAPS-002", "attempt projected IME xcu.h()", always = true)
             prepareXcuForExternalKeyboard(resolved)
-            XposedHelpers.callMethod(resolved, "h")
+            Reflect.callMethod(resolved, "h")
             if (isProjectedKeyboardStarted(resolved)) {
                 ModuleLog.gearhead("GH-MAPS-003", "xcu.h() started PhoneKeyboardActivity", always = true)
                 true
@@ -1130,7 +1108,7 @@ object GearheadHooks {
     }
 
     private fun isProjectedKeyboardStarted(ime: Any): Boolean {
-        return runCatching { XposedHelpers.getObjectField(ime, "q") != null }.getOrDefault(false)
+        return runCatching { Reflect.getObjectField(ime, "q") != null }.getOrDefault(false)
     }
 
     private fun tryOpenProjectionFragmentFromIme(classLoader: ClassLoader, ime: Any?): Boolean {
@@ -1138,7 +1116,7 @@ object GearheadHooks {
         val xdm = findGearheadClass(classLoader, "xdm")
         if (!xdm.isInstance(resolved)) return false
         return runCatching {
-            val fragment = XposedHelpers.callMethod(resolved, "e") ?: return false
+            val fragment = Reflect.callMethod(resolved, "e") ?: return false
             activeInputFragment = WeakReference(fragment)
             openProjectedImeViaXdb()
         }.getOrDefault(false)
@@ -1146,24 +1124,24 @@ object GearheadHooks {
 
     private fun prepareXcuForExternalKeyboard(ime: Any) {
         runCatching {
-            val alreadyRunning = XposedHelpers.getObjectField(ime, "q")
-            if (XposedHelpers.getBooleanField(ime, "k") && alreadyRunning == null) {
-                XposedHelpers.setBooleanField(ime, "k", false)
+            val alreadyRunning = Reflect.getObjectField(ime, "q")
+            if (Reflect.getBooleanField(ime, "k") && alreadyRunning == null) {
+                Reflect.setBooleanField(ime, "k", false)
             }
-            XposedHelpers.setBooleanField(ime, "l", true)
-            val editorInfo = XposedHelpers.getObjectField(ime, "h") as? EditorInfo
+            Reflect.setBooleanField(ime, "l", true)
+            val editorInfo = Reflect.getObjectField(ime, "h") as? EditorInfo
                 ?: EditorInfo().apply {
                     packageName = "com.google.android.apps.maps"
                     inputType = InputType.TYPE_CLASS_TEXT
                     hintText = "Search"
                 }
-            if (XposedHelpers.getObjectField(ime, "h") == null) {
-                XposedHelpers.setObjectField(ime, "h", editorInfo)
+            if (Reflect.getObjectField(ime, "h") == null) {
+                Reflect.setObjectField(ime, "h", editorInfo)
             }
             runCatching {
-                val xdb = XposedHelpers.callMethod(ime, "f")
+                val xdb = Reflect.callMethod(ime, "f")
                 if (xdb != null) {
-                    XposedHelpers.setBooleanField(xdb, "c", false)
+                    Reflect.setBooleanField(xdb, "c", false)
                 }
             }
         }
@@ -1174,13 +1152,13 @@ object GearheadHooks {
         return runCatching {
             if (ime !is Service) return false
             prepareXcuForExternalKeyboard(ime)
-            val editorInfo = XposedHelpers.getObjectField(ime, "h") as EditorInfo
-            val phoneKb = XposedHelpers.findClass(
+            val editorInfo = Reflect.getObjectField(ime, "h") as EditorInfo
+            val phoneKb = Reflect.findClass(
                 "com.google.android.apps.auto.components.externalkeyboard.phone.PhoneKeyboardActivity",
                 classLoader
             )
-            val clientId = XposedHelpers.getIntField(ime, "m") + 1
-            XposedHelpers.setIntField(ime, "m", clientId)
+            val clientId = Reflect.getIntField(ime, "m") + 1
+            Reflect.setIntField(ime, "m", clientId)
             val intent = Intent(ime, phoneKb).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 putExtra("IMEClass", ime.javaClass.name)
@@ -1189,7 +1167,7 @@ object GearheadHooks {
                 putExtra("ImeHint", editorInfo.hintText?.toString() ?: "")
             }
             val lfe = findGearheadClass(classLoader, "lfe")
-            val launchOpts = XposedHelpers.callStaticMethod(lfe, "b") as android.os.Bundle
+            val launchOpts = Reflect.callStaticMethod(lfe, "b") as android.os.Bundle
             ime.startActivity(intent, launchOpts)
             ModuleLog.gearhead("GH-MAPS-003", "force-started PhoneKeyboardActivity (car display)", always = true)
             true
@@ -1202,10 +1180,10 @@ object GearheadHooks {
     private fun openProjectedImeViaXdl(classLoader: ClassLoader): Boolean {
         return runCatching {
             val xdm = findGearheadClass(classLoader, "xdm")
-            val config = XposedHelpers.callMethod(xdm, "e")
-                ?: XposedHelpers.newInstance(findGearheadClass(classLoader, "xdl"))
-            XposedHelpers.setBooleanField(config, "c", false)
-            XposedHelpers.callMethod(config, "d")
+            val config = Reflect.callMethod(xdm, "e")
+                ?: Reflect.newInstance(findGearheadClass(classLoader, "xdl"))
+            Reflect.setBooleanField(config, "c", false)
+            Reflect.callMethod(config, "d")
             ModuleLog.gearhead("GH-MAPS-003", "xdl/xdu.d() projection keyboard", always = true)
             true
         }.getOrElse {
@@ -1219,12 +1197,12 @@ object GearheadHooks {
             ModuleLog.gearhead("GH-MAPS-002", "attempt projected IME xdb.d() unlock", always = true)
             val fragment = activeInputFragment?.get()
                 ?: throw IllegalStateException("no cached xdb fragment")
-            val wasLocked = XposedHelpers.getBooleanField(fragment, "c")
+            val wasLocked = Reflect.getBooleanField(fragment, "c")
             if (wasLocked) {
-                XposedHelpers.setBooleanField(fragment, "c", false)
+                Reflect.setBooleanField(fragment, "c", false)
             }
-            XposedHelpers.callMethod(fragment, "d")
-            val unlocked = !XposedHelpers.getBooleanField(fragment, "c")
+            Reflect.callMethod(fragment, "d")
+            val unlocked = !Reflect.getBooleanField(fragment, "c")
             if (unlocked) {
                 ModuleLog.gearhead("GH-MAPS-003", "xdb.d() projection keyboard shown", always = true)
                 true
@@ -1238,11 +1216,11 @@ object GearheadHooks {
         }
     }
 
-    private fun hookHintStringRewrites(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun hookHintStringRewrites(ctx: HookContext) {
         runCatching {
-            val gbh = findGearheadClass(lpparam.classLoader, "gbh")
-            XposedHelpers.findAndHookMethod(gbh, "a", String::class.java, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val gbh = findGearheadClass(ctx.classLoader, "gbh")
+            HookChains.findAndHookMethod(xposed, gbh, "a", object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     val original = param.args[0] as? String ?: return
                     val rewritten = VoicePlateHints.rewriteIfVoiceOnly(original) ?: return
@@ -1253,14 +1231,14 @@ object GearheadHooks {
                     )
                     param.args[0] = rewritten
                 }
-            })
+            }, String::class.java)
             log("Hooked gbh.a (${gbh.name})")
         }.onFailure { log("Failed to hook gbh.a: ${it.message}") }
 
         runCatching {
-            val gdm = findGearheadClass(lpparam.classLoader, "gdm")
-            XposedHelpers.findAndHookMethod(gdm, "b", String::class.java, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val gdm = findGearheadClass(ctx.classLoader, "gdm")
+            HookChains.findAndHookMethod(xposed, gdm, "b", object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     val original = param.args[0] as? String ?: return
                     val rewritten = VoicePlateHints.rewriteIfVoiceOnly(original) ?: return
@@ -1271,16 +1249,16 @@ object GearheadHooks {
                     )
                     param.args[0] = rewritten
                 }
-            })
+            }, String::class.java)
             log("Hooked gdm.b (${gdm.name})")
         }.onFailure { log("Failed to hook gdm.b: ${it.message}") }
 
         runCatching {
-            val carText = XposedHelpers.findClass("androidx.car.app.model.CarText", lpparam.classLoader)
+            val carText = Reflect.findClass("androidx.car.app.model.CarText", ctx.classLoader)
             for (method in carText.declaredMethods) {
                 if (method.name != "create") continue
-                XposedBridge.hookMethod(method, object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
+                HookChains.hookMethod(xposed, method, object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
                         if (!ModulePrefs.isEnabled()) return
                         for (i in param.args.indices) {
                             val arg = param.args[i] ?: continue
@@ -1304,12 +1282,8 @@ object GearheadHooks {
         }.onFailure { log("Failed to hook CarText.create: ${it.message}") }
 
         runCatching {
-            XposedHelpers.findAndHookMethod(
-                android.content.res.Resources::class.java,
-                "getString",
-                Int::class.javaPrimitiveType!!,
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
+            HookChains.findAndHookMethod(xposed, android.content.res.Resources::class.java, "getString", object : MethodHook() {
+                    override fun afterHookedMethod(param: HookParam) {
                         if (!ModulePrefs.isEnabled()) return
                         val original = param.result as? String ?: return
                         val rewritten = VoicePlateHints.rewriteIfVoiceOnly(original) ?: return
@@ -1320,8 +1294,7 @@ object GearheadHooks {
                             always = true
                         )
                     }
-                }
-            )
+                }, Int::class.javaPrimitiveType!!)
             log("Hooked Resources.getString hint rewrite")
         }.onFailure { log("Failed to hook Resources.getString: ${it.message}") }
     }
@@ -1329,16 +1302,16 @@ object GearheadHooks {
     private fun patchSearchTemplateHint(result: Any?, gbh: Class<*>, @Suppress("UNUSED_PARAMETER") classLoader: ClassLoader) {
         if (result == null) return
         runCatching {
-            val gan = XposedHelpers.getObjectField(result, "c") ?: return
-            val hintObj = XposedHelpers.getObjectField(gan, "b") ?: return
+            val gan = Reflect.getObjectField(result, "c") ?: return
+            val hintObj = Reflect.getObjectField(gan, "b") ?: return
             val original = runCatching {
-                XposedHelpers.callMethod(hintObj, "toCharSequence") as? CharSequence
+                Reflect.callMethod(hintObj, "toCharSequence") as? CharSequence
             }.getOrNull()?.toString() ?: hintObj.toString()
             val rewritten = VoicePlateHints.rewriteIfVoiceOnly(original) ?: return
-            XposedHelpers.setObjectField(
+            Reflect.setObjectField(
                 gan,
                 "b",
-                XposedHelpers.callStaticMethod(gbh, "a", rewritten)
+                Reflect.callStaticMethod(gbh, "a", rewritten)
             )
             ModuleLog.gearhead(
                 "GH-HINT-001",
@@ -1350,52 +1323,52 @@ object GearheadHooks {
         }
     }
 
-    private fun hookVoicePlateAndAssistant(lpparam: XC_LoadPackage.LoadPackageParam) {
-        hookVoicePlateWidget(lpparam)
-        hookVoiceMicCapture(lpparam)
-        hookAssistantController(lpparam)
+    private fun hookVoicePlateAndAssistant(ctx: HookContext) {
+        hookVoicePlateWidget(ctx)
+        hookVoiceMicCapture(ctx)
+        hookAssistantController(ctx)
     }
 
-    private fun hookVoicePlateWidget(lpparam: XC_LoadPackage.LoadPackageParam) {
-        val carText = XposedHelpers.findClass("androidx.car.app.model.CarText", lpparam.classLoader)
+    private fun hookVoicePlateWidget(ctx: HookContext) {
+        val carText = Reflect.findClass("androidx.car.app.model.CarText", ctx.classLoader)
 
         runCatching {
-            val voicePlateWidget = XposedHelpers.findClass(
+            val voicePlateWidget = Reflect.findClass(
                 "com.android.car.libraries.apphost.external.model.widgets.VoicePlateWidget",
-                lpparam.classLoader
+                ctx.classLoader
             )
-            val action = XposedHelpers.findClass("androidx.car.app.model.Action", lpparam.classLoader)
-            val carIcon = XposedHelpers.findClass("androidx.car.app.model.CarIcon", lpparam.classLoader)
-            XposedHelpers.findAndHookConstructor(
+            val action = Reflect.findClass("androidx.car.app.model.Action", ctx.classLoader)
+            val carIcon = Reflect.findClass("androidx.car.app.model.CarIcon", ctx.classLoader)
+            HookChains.findAndHookConstructor(xposed,
                 voicePlateWidget,
-                action,
-                carIcon,
-                carText,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
+                object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
                         if (!ModulePrefs.isEnabled()) return
                         debugEntry("VoicePlateWidget.<init>()")
-                        rewritePlaceholderArg(param, 2, lpparam.classLoader, carText)
-                        rewriteVoicePlateMicIconArg(param, 1, lpparam.classLoader)
+                        rewritePlaceholderArg(param, 2, ctx.classLoader, carText)
+                        rewriteVoicePlateMicIconArg(param, 1, ctx.classLoader)
                     }
-                }
+                },
+                action,
+                carIcon,
+                carText
             )
-            XposedHelpers.findAndHookMethod(voicePlateWidget, "getPlaceholderText", object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
+            HookChains.findAndHookMethod(xposed, voicePlateWidget, "getPlaceholderText", object : MethodHook() {
+                override fun afterHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     val placeholder = param.result ?: return
                     if (!VoicePlateHints.isVoiceOnlyHint(placeholder)) return
                     debug("VoicePlateWidget.getPlaceholderText() rewritten")
-                    param.result = VoicePlateHints.createCarText(lpparam.classLoader)
+                    param.result = VoicePlateHints.createCarText(ctx.classLoader)
                 }
             })
-            XposedHelpers.findAndHookMethod(voicePlateWidget, "getIcon", object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
+            HookChains.findAndHookMethod(xposed, voicePlateWidget, "getIcon", object : MethodHook() {
+                override fun afterHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     val icon = param.result ?: return
                     val replaced = VoicePlateMicIcon.replaceMicCarIcon(
-                        lpparam.classLoader,
-                        resolveGearheadContext(lpparam.classLoader),
+                        ctx.classLoader,
+                        resolveGearheadContext(ctx.classLoader),
                         icon
                     )
                     if (replaced !== icon) {
@@ -1407,39 +1380,33 @@ object GearheadHooks {
         }.onFailure { log("Failed to hook VoicePlateWidget: ${it.message}") }
 
         runCatching {
-            val fuw = findGearheadClass(lpparam.classLoader, "fuw")
-            val fyt = findGearheadClass(lpparam.classLoader, "fyt")
-            val hjq = findGearheadClass(lpparam.classLoader, "hjq")
-            XposedHelpers.findAndHookConstructor(hjq, fuw, fyt, carText, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val fuw = findGearheadClass(ctx.classLoader, "fuw")
+            val fyt = findGearheadClass(ctx.classLoader, "fyt")
+            val hjq = findGearheadClass(ctx.classLoader, "hjq")
+            HookChains.findAndHookConstructor(xposed, hjq,
+                object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     debugEntry("hjq.<init>()")
-                    rewritePlaceholderArg(param, 2, lpparam.classLoader, carText)
-                    rewriteVoicePlateMicFytArg(param, 1, lpparam.classLoader)
+                    rewritePlaceholderArg(param, 2, ctx.classLoader, carText)
+                    rewriteVoicePlateMicFytArg(param, 1, ctx.classLoader)
                 }
-            })
+            }, fuw, fyt, carText)
             log("Hooked hjq constructor (${hjq.name})")
         }.onFailure { log("Failed to hook hjq: ${it.message}") }
 
         runCatching {
-            val fvj = findGearheadClass(lpparam.classLoader, "fvj")
-            val afes = findGearheadClass(lpparam.classLoader, "afes")
-            val fyh = findGearheadClass(lpparam.classLoader, "fyh")
-            val gbg = findGearheadClass(lpparam.classLoader, "gbg")
-            val gbh = findGearheadClass(lpparam.classLoader, "gbh")
-            val hdx = findGearheadClass(lpparam.classLoader, "hdx")
-            val hjv = findGearheadClass(lpparam.classLoader, "hjv")
-            XposedHelpers.findAndHookConstructor(
+            val fvj = findGearheadClass(ctx.classLoader, "fvj")
+            val afes = findGearheadClass(ctx.classLoader, "afes")
+            val fyh = findGearheadClass(ctx.classLoader, "fyh")
+            val gbg = findGearheadClass(ctx.classLoader, "gbg")
+            val gbh = findGearheadClass(ctx.classLoader, "gbh")
+            val hdx = findGearheadClass(ctx.classLoader, "hdx")
+            val hjv = findGearheadClass(ctx.classLoader, "hjv")
+            HookChains.findAndHookConstructor(xposed,
                 hjv,
-                fvj,
-                afes,
-                fyh,
-                gbg,
-                Int::class.javaPrimitiveType!!,
-                hdx,
-                Boolean::class.javaPrimitiveType!!,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
+                object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
                         if (!ModulePrefs.isEnabled()) return
                         val state = param.args[4] as Int
                         debugEntry("hjv.<init>() transcriptionState=$state")
@@ -1449,7 +1416,7 @@ object GearheadHooks {
                         }
                         val text = param.args[3]
                         if (text != null && VoicePlateHints.isVoiceOnlyHint(text)) {
-                            param.args[3] = XposedHelpers.callStaticMethod(
+                            param.args[3] = Reflect.callStaticMethod(
                                 gbh,
                                 "a",
                                 VoicePlateHints.MAPS_HOOK_BANNER
@@ -1460,16 +1427,23 @@ object GearheadHooks {
                                 always = true
                             )
                         }
-                        rewriteVoicePlateMicFyhArg(param, 2, lpparam.classLoader)
+                        rewriteVoicePlateMicFyhArg(param, 2, ctx.classLoader)
                     }
-                }
+                },
+                fvj,
+                afes,
+                fyh,
+                gbg,
+                Int::class.javaPrimitiveType!!,
+                hdx,
+                Boolean::class.javaPrimitiveType!!
             )
             log("Hooked hjv constructor (${hjv.name})")
         }.onFailure { log("Failed to hook hjv: ${it.message}") }
     }
 
     private fun rewriteVoicePlateMicIconArg(
-        param: XC_MethodHook.MethodHookParam,
+        param: HookParam,
         index: Int,
         classLoader: ClassLoader
     ) {
@@ -1482,7 +1456,7 @@ object GearheadHooks {
     }
 
     private fun rewriteVoicePlateMicFytArg(
-        param: XC_MethodHook.MethodHookParam,
+        param: HookParam,
         index: Int,
         classLoader: ClassLoader
     ) {
@@ -1495,7 +1469,7 @@ object GearheadHooks {
     }
 
     private fun rewriteVoicePlateMicFyhArg(
-        param: XC_MethodHook.MethodHookParam,
+        param: HookParam,
         index: Int,
         classLoader: ClassLoader
     ) {
@@ -1508,14 +1482,14 @@ object GearheadHooks {
     }
 
     private fun rewritePlaceholderArg(
-        param: XC_MethodHook.MethodHookParam,
+        param: HookParam,
         index: Int,
         classLoader: ClassLoader,
         carText: Class<*>
     ) {
         val placeholder = param.args[index] ?: return
         val text = runCatching {
-            XposedHelpers.callMethod(placeholder, "toCharSequence") as? CharSequence
+            Reflect.callMethod(placeholder, "toCharSequence") as? CharSequence
         }.getOrNull()?.toString()
         if (text != null) {
             debug("VoicePlate placeholder: \"$text\"")
@@ -1525,54 +1499,49 @@ object GearheadHooks {
         ModuleLog.gearhead("GH-HINT-001", "VoicePlate placeholder rewritten to banner", always = true)
     }
 
-    private fun hookAssistantController(lpparam: XC_LoadPackage.LoadPackageParam) {
+    private fun hookAssistantController(ctx: HookContext) {
         runCatching {
-            val kxe = findGearheadClass(lpparam.classLoader, "kxe")
-            val qjr = findGearheadClass(lpparam.classLoader, "qjr")
-            XposedHelpers.findAndHookMethod(kxe, "O", qjr, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val kxe = findGearheadClass(ctx.classLoader, "kxe")
+            val qjr = findGearheadClass(ctx.classLoader, "qjr")
+            HookChains.findAndHookMethod(xposed, kxe, "O", object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     debugEntry("kxe.O() startTranscription")
                 }
-            })
+            }, qjr)
             log("Hooked kxe.O (${kxe.name})")
         }.onFailure { log("Failed to hook kxe.O: ${it.message}") }
 
         runCatching {
-            val kxe = findGearheadClass(lpparam.classLoader, "kxe")
-            val voiceSessionConfig = XposedHelpers.findClass(
+            val kxe = findGearheadClass(ctx.classLoader, "kxe")
+            val voiceSessionConfig = Reflect.findClass(
                 "com.google.android.gearhead.sdk.assistant.VoiceSessionConfig",
-                lpparam.classLoader
+                ctx.classLoader
             )
-            XposedHelpers.findAndHookMethod(kxe, "ac", voiceSessionConfig, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            HookChains.findAndHookMethod(xposed, kxe, "ac", object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     val config = param.args[0] ?: return
-                    val sessionType = XposedHelpers.getIntField(config, "a")
-                    val trigger = XposedHelpers.getIntField(config, "f")
+                    val sessionType = Reflect.getIntField(config, "a")
+                    val trigger = Reflect.getIntField(config, "f")
                     debugEntry("kxe.ac() type=$sessionType trigger=$trigger")
                     if (sessionType in VOICE_BLOCK_SESSION_TYPES) {
                         debug("kxe.ac() blocked voice/dictation type=$sessionType trigger=$trigger")
                         param.result = null
                     }
                 }
-            })
+            }, voiceSessionConfig)
             log("Hooked kxe.ac (${kxe.name})")
         }.onFailure { log("Failed to hook kxe.ac: ${it.message}") }
 
         runCatching {
-            val kxe = findGearheadClass(lpparam.classLoader, "kxe")
-            val messagingInfo = XposedHelpers.findClass(
+            val kxe = findGearheadClass(ctx.classLoader, "kxe")
+            val messagingInfo = Reflect.findClass(
                 "com.google.android.gearhead.sdk.assistant.MessagingInfo",
-                lpparam.classLoader
+                ctx.classLoader
             )
-            XposedHelpers.findAndHookMethod(
-                kxe,
-                "aa",
-                messagingInfo,
-                Int::class.javaPrimitiveType!!,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
+            HookChains.findAndHookMethod(xposed, kxe, "aa", object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
                         if (!ModulePrefs.isEnabled()) return
                         val type = param.args[1] as Int
                         debugEntry("kxe.aa() type=$type")
@@ -1580,27 +1549,21 @@ object GearheadHooks {
                             debug("kxe.aa() direct reply proceeds; mic blocked via kwt/GhMicrophone")
                         }
                     }
-                }
-            )
-            XposedHelpers.findAndHookMethod(kxe, "t", messagingInfo, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+                }, messagingInfo, Int::class.javaPrimitiveType!!)
+            HookChains.findAndHookMethod(xposed, kxe, "t", object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     debugEntry("kxe.t() notification direct reply")
                 }
-            })
+            }, messagingInfo)
             log("Hooked kxe.aa/t (${kxe.name})")
         }.onFailure { log("Failed to hook kxe.aa/t: ${it.message}") }
 
         runCatching {
-            val kvl = findGearheadClass(lpparam.classLoader, "kvl")
-            val kcw = findGearheadClass(lpparam.classLoader, "kcw")
-            XposedHelpers.findAndHookMethod(
-                kcw,
-                "k",
-                kvl,
-                Int::class.javaPrimitiveType!!,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
+            val kvl = findGearheadClass(ctx.classLoader, "kvl")
+            val kcw = findGearheadClass(ctx.classLoader, "kcw")
+            HookChains.findAndHookMethod(xposed, kcw, "k", object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
                         if (!ModulePrefs.isEnabled()) return
                         val trigger = param.args[1] as Int
                         debugEntry("kcw.k() trigger=$trigger")
@@ -1608,39 +1571,33 @@ object GearheadHooks {
                             debug("kcw.k($trigger) voice search (Maps keyboard uses qhf.l/snp.k path)")
                         }
                     }
-                }
-            )
+                }, kvl, Int::class.javaPrimitiveType!!)
             log("Hooked kcw.k (${kcw.name})")
         }.onFailure { log("Failed to hook kcw.k: ${it.message}") }
 
         runCatching {
-            val qib = findGearheadClass(lpparam.classLoader, "qib")
-            XposedHelpers.findAndHookMethod(
-                qib,
-                "l",
-                Int::class.javaPrimitiveType!!,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
+            val qib = findGearheadClass(ctx.classLoader, "qib")
+            HookChains.findAndHookMethod(xposed, qib, "l", object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
                         if (!ModulePrefs.isEnabled()) return
                         debugEntry("kvl.l() trigger=${param.args[0]}")
                     }
-                }
-            )
+                }, Int::class.javaPrimitiveType!!)
             log("Hooked kvl.l (${qib.name})")
         }.onFailure { log("Failed to hook kvl.l: ${it.message}") }
     }
 
     private fun hookLgzImplementors(
-        lpparam: XC_LoadPackage.LoadPackageParam,
+        ctx: HookContext,
         lgz: Class<*>,
         outerShortName: String
     ) {
-        val outer = findGearheadClass(lpparam.classLoader, outerShortName)
-        val hook = object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
+        val outer = findGearheadClass(ctx.classLoader, outerShortName)
+        val hook = object : MethodHook() {
+            override fun beforeHookedMethod(param: HookParam) {
                 if (!ModulePrefs.isEnabled()) return
                 if (param.args[0] == false) {
-                    debug("lgz.a() forced true in ${param.thisObject.javaClass.name}")
+                    debug("lgz.a() forced true in ${param.thisObject?.javaClass?.name}")
                     param.args[0] = true
                 }
             }
@@ -1648,22 +1605,22 @@ object GearheadHooks {
         for (inner in outer.declaredClasses) {
             if (lgz.isAssignableFrom(inner)) {
                 runCatching {
-                    XposedHelpers.findAndHookMethod(inner, "a", Boolean::class.javaPrimitiveType!!, hook)
+                    HookChains.findAndHookMethod(xposed, inner, "a", hook, Boolean::class.javaPrimitiveType!!)
                 }
             }
         }
     }
 
     private fun hookTemplateHintMethod(
-        lpparam: XC_LoadPackage.LoadPackageParam,
+        ctx: HookContext,
         className: String,
         methodName: String,
         paramType: Class<*>
     ) {
         runCatching {
-            val clazz = findGearheadClass(lpparam.classLoader, className)
-            XposedHelpers.findAndHookMethod(clazz, methodName, paramType, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val clazz = findGearheadClass(ctx.classLoader, className)
+            HookChains.findAndHookMethod(xposed, clazz, methodName, object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     debugEntry("$className.$methodName()")
                     if (!ModulePrefs.isEnabled()) return
                     if (param.args[0] == false) {
@@ -1671,21 +1628,21 @@ object GearheadHooks {
                         param.args[0] = true
                     }
                 }
-            })
+            }, paramType)
             log("Hooked $className.$methodName (${clazz.name})")
         }.onFailure { log("Failed to hook $className.$methodName: ${it.message}") }
     }
 
     private fun hookTemplateKeyboardMethod(
-        lpparam: XC_LoadPackage.LoadPackageParam,
+        ctx: HookContext,
         className: String,
         methodName: String,
         paramType: Class<*>
     ) {
         runCatching {
-            val clazz = findGearheadClass(lpparam.classLoader, className)
-            XposedHelpers.findAndHookMethod(clazz, methodName, paramType, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val clazz = findGearheadClass(ctx.classLoader, className)
+            HookChains.findAndHookMethod(xposed, clazz, methodName, object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     debugEntry("$className.$methodName()")
                     if (!ModulePrefs.isEnabled()) return
                     if (param.args[0] == false) {
@@ -1693,19 +1650,19 @@ object GearheadHooks {
                         param.args[0] = true
                     }
                 }
-            })
+            }, paramType)
             log("Hooked $className.$methodName (${clazz.name})")
         }.onFailure { log("Failed to hook $className.$methodName: ${it.message}") }
     }
 
-    private fun hookInputMethodFragment(lpparam: XC_LoadPackage.LoadPackageParam) {
-        val unlockHook = object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
+    private fun hookInputMethodFragment(ctx: HookContext) {
+        val unlockHook = object : MethodHook() {
+            override fun beforeHookedMethod(param: HookParam) {
                 if (!ModulePrefs.isEnabled()) return
-                val name = param.thisObject.javaClass.simpleName
+                val name = param.thisObject?.javaClass?.simpleName ?: return
                 debugEntry("$name.d()")
-                val locked = XposedHelpers.getBooleanField(param.thisObject, "c")
-                XposedHelpers.setBooleanField(param.thisObject, "c", false)
+                val locked = Reflect.getBooleanField(param.thisObject, "c")
+                Reflect.setBooleanField(param.thisObject, "c", false)
                 if (locked) {
                     debug("$name.d() forced c=false (keyboard unlock)")
                 }
@@ -1713,18 +1670,18 @@ object GearheadHooks {
         }
 
         runCatching {
-            val xdb = findGearheadClass(lpparam.classLoader, "xdb")
-            XposedHelpers.findAndHookMethod(xdb, "onStart", object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
+            val xdb = findGearheadClass(ctx.classLoader, "xdb")
+            HookChains.findAndHookMethod(xposed, xdb, "onStart", object : MethodHook() {
+                override fun afterHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     activeInputFragment = WeakReference(param.thisObject)
                     debugEntry("xdb.onStart()")
-                    val locked = XposedHelpers.getBooleanField(param.thisObject, "c")
-                    XposedHelpers.setBooleanField(param.thisObject, "c", false)
+                    val locked = Reflect.getBooleanField(param.thisObject, "c")
+                    Reflect.setBooleanField(param.thisObject, "c", false)
                     if (locked) {
                         debug("xdb.onStart() forced c=false before d()")
                     }
-                    XposedHelpers.callMethod(param.thisObject, "d")
+                    Reflect.callMethod(param.thisObject, "d")
                 }
             })
             log("Hooked xdb.onStart (${xdb.name})")
@@ -1732,20 +1689,20 @@ object GearheadHooks {
 
         for (shortName in listOf("xdl", "xdu")) {
             runCatching {
-                val clazz = findGearheadClass(lpparam.classLoader, shortName)
+                val clazz = findGearheadClass(ctx.classLoader, shortName)
                 if (clazz.isInterface || Modifier.isAbstract(clazz.modifiers)) {
                     log("Skipping $shortName.d (abstract/interface)")
                     return@runCatching
                 }
-                XposedHelpers.findAndHookMethod(clazz, "d", unlockHook)
+                HookChains.findAndHookMethod(xposed, clazz, "d", unlockHook)
                 log("Hooked $shortName.d (${clazz.name})")
             }.onFailure { log("Failed to hook $shortName.d: ${it.message}") }
         }
 
         runCatching {
-            val xdu = findGearheadClass(lpparam.classLoader, "xdu")
-            XposedHelpers.findAndHookMethod(xdu, "k", object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
+            val xdu = findGearheadClass(ctx.classLoader, "xdu")
+            HookChains.findAndHookMethod(xposed, xdu, "k", object : MethodHook() {
+                override fun afterHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     if (param.result == true) {
                         debug("xdu.k() forced false (rotary lockout bypass)")
@@ -1757,9 +1714,9 @@ object GearheadHooks {
         }.onFailure { log("Failed to hook xdu.k: ${it.message}") }
 
         runCatching {
-            val xcu = findGearheadClass(lpparam.classLoader, "xcu")
-            XposedHelpers.findAndHookMethod(xcu, "h", object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
+            val xcu = findGearheadClass(ctx.classLoader, "xcu")
+            HookChains.findAndHookMethod(xposed, xcu, "h", object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     debugEntry("xcu.h() maybeStartExternalKeyboard")
                 }
@@ -1769,14 +1726,14 @@ object GearheadHooks {
 
         // xdm.e() returns null when npz reports invalid input config — NPE in xcu.c without this.
         runCatching {
-            val xdm = findGearheadClass(lpparam.classLoader, "xdm")
-            XposedHelpers.findAndHookMethod(xdm, "e", object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
+            val xdm = findGearheadClass(ctx.classLoader, "xdm")
+            HookChains.findAndHookMethod(xposed, xdm, "e", object : MethodHook() {
+                override fun afterHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     if (param.result == null) {
                         log("xdm.e() was null — falling back to xdl")
-                        val xdl = findGearheadClass(lpparam.classLoader, "xdl")
-                        param.result = XposedHelpers.newInstance(xdl)
+                        val xdl = findGearheadClass(ctx.classLoader, "xdl")
+                        param.result = Reflect.newInstance(xdl)
                     }
                 }
             })
