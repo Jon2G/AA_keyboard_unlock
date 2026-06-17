@@ -1,38 +1,34 @@
 package com.jon2g.aa_keyboard_unlock.hooks
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.app.Activity
+import android.view.View
+import android.view.ViewGroup
+import android.app.Application
+import com.jon2g.aa_keyboard_unlock.BuildConfig
+import com.jon2g.aa_keyboard_unlock.MapsNativeIme
+import com.jon2g.aa_keyboard_unlock.ModuleLog
+import com.jon2g.aa_keyboard_unlock.prefs.ModulePrefs
 import com.jon2g.aa_keyboard_unlock.xposed.DexHooks
 import com.jon2g.aa_keyboard_unlock.xposed.HookChains
 import com.jon2g.aa_keyboard_unlock.xposed.HookContext
 import com.jon2g.aa_keyboard_unlock.xposed.HookParam
 import com.jon2g.aa_keyboard_unlock.xposed.MethodHook
-import com.jon2g.aa_keyboard_unlock.xposed.MethodReplacement
 import com.jon2g.aa_keyboard_unlock.xposed.Reflect
-import dalvik.system.DexFile
 import io.github.libxposed.api.XposedInterface
-
-
-import android.app.Activity
-import android.app.Application
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
-import android.content.res.Configuration
-import android.content.ComponentCallbacks2
-import android.os.Build
-import android.view.Display
-import android.view.KeyEvent
-import android.view.MotionEvent
-import android.util.Pair
-import android.view.View
-import com.jon2g.aa_keyboard_unlock.KeyboardBridge
-import com.jon2g.aa_keyboard_unlock.MapsSearchSubmit
-import com.jon2g.aa_keyboard_unlock.MicSignal
-import com.jon2g.aa_keyboard_unlock.ModuleLog
-import com.jon2g.aa_keyboard_unlock.overlay.ProjectedKeyboardOverlay
-import com.jon2g.aa_keyboard_unlock.prefs.ModulePrefs
 import java.lang.ref.WeakReference
+import java.lang.reflect.Modifier
 
+/**
+ * Maps-process hooks: spoof in-process driving/distraction detection so the stock
+ * projected keyboard (rek.d / reh.b) opens instead of voice search.
+ */
 object MapsHooks {
     @Volatile
     private lateinit var xposed: XposedInterface
@@ -41,250 +37,179 @@ object MapsHooks {
     private var installedForProcess = false
 
     @Volatile
-    private var kurAjHookLogged = false
+    private var kurHintHookLogged = false
 
-    /** Latest rek overlay (rel or dex-discovered implementor). */
     @Volatile
-    private var lastRel: WeakReference<Any>? = null
+    private var imeReceiverRegistered = false
 
-    /** Maps car host (tur/tvj/llj) for dispatchKeyEvent keyboard fallback. */
     @Volatile
-    private var lastMapsCarHost: WeakReference<Any>? = null
+    private var blhxSingleton: Any? = null
+
+    /** Latest rek overlay (rel) for native keyboard bind/show. */
+    @Volatile
+    private var lastRek: WeakReference<Any>? = null
 
     @Volatile
     private var lastSnp: WeakReference<Any>? = null
 
-    private val pendingGmmMic = ThreadLocal<Boolean>()
-
-    /** Set while qhf.k()/i() mic shortcuts run — allow pub.s / lka voice IPC. */
-    private val mapsMicVoiceActive = ThreadLocal<Boolean>()
-
     @Volatile
     private var mapsClassLoader: ClassLoader? = null
+
+    private val installAudit = MapsInstallProbe.InstallAudit()
+
+    private lateinit var targets: MapsSignatureDiscovery.DiscoveredTargets
+
+    @Volatile
+    private var storedCtx: HookContext? = null
+
+    @Volatile
+    private var discoveryRetried = false
+
+    private val mapsMicVoiceActive = ThreadLocal<Boolean>()
 
     fun install(ctx: HookContext) {
         if (installedForProcess) return
         installedForProcess = true
         xposed = ctx.xposed
         installHooks(ctx)
-        runCatching {
-            val app = Reflect.callStaticMethod(
-                Class.forName("android.app.ActivityThread"),
-                "currentApplication"
-            ) as? Application
-            if (app != null) {
-                registerMapsKeyboardReceiver(app)
-                registerOverlayDismissOnNavigation(app)
-            }
-        }
     }
 
     private fun installHooks(ctx: HookContext) {
+        storedCtx = ctx
         mapsClassLoader = ctx.classLoader
         ModuleLog.install(
             ModuleLog.Process.MAPS,
-            "enabled=${ModulePrefs.isEnabled()} debug=${ModulePrefs.isDebug()} pkg=${ctx.packageName} process=${ctx.processName}"
+            "enabled=${ModulePrefs.isEnabled()} debug=${ModulePrefs.isDebug()} " +
+                "pref=${ModulePrefs.lastPrefSource} build=${BuildConfig.BUILD_TYPE} " +
+                "pkg=${ctx.packageName} process=${ctx.processName}"
         )
-        hookSearchHintResolver(ctx)
+        MapsInstallProbe.resolveAtInstall(ctx)
+        targets = MapsSignatureDiscovery.discover(ctx)
+        hookDrivingHintResolver(ctx)
         hookHeaderUiState(ctx)
         hookDistractionState(ctx)
-        hookMapsCarHostCache(ctx)
-        hookGmmMicBinder(ctx)
-        hookPubVoiceSearch(ctx)
+        hookCarParametersKeyboardFlag(ctx)
+        hookRekCache(ctx)
+        hookSearchHeaderRekCache(ctx)
+        hookSnpNativePath(ctx)
         hookSearchBarTap(ctx)
-        hookProjectedKeyboard(ctx)
-        hookMapsCarTouchIntercept(ctx)
-        hookMapsVoiceSession(ctx)
         hookTrtDrivingFlags(ctx)
+        hookMapsVoiceBypass(ctx)
+        hookTurNavSearch(ctx)
+        hookDrivingResourceTrace(ctx)
+        hookVoiceOnlyPath(ctx)
+        hookLazyImeReceiverRegistration(ctx)
+        MapsInstallProbe.run(ctx, installAudit, targets)
         ModuleLog.maps("MAPS-INSTALL", "hooks installed for ${ctx.processName}", always = true)
     }
 
-    private fun registerMapsKeyboardReceiver(app: Application) {
-        runCatching {
-            val receiver = object : BroadcastReceiver() {
-                override fun onReceive(context: Context, intent: Intent) {
-                    if (!ModulePrefs.isEnabled()) return
-                    when (intent.action) {
-                        KeyboardBridge.ACTION_PREPARE_MAPS_IME -> {
-                            ModuleLog.maps(
-                                "MAPS-001",
-                                "broadcast PREPARE_MAPS_IME — binding projected keyboard",
-                                always = true
-                            )
-                            prepareMapsIme()
-                        }
-                        KeyboardBridge.ACTION_OPEN_MAPS_KEYBOARD -> {
-                            ModuleLog.maps(
-                                "MAPS-001",
-                                "broadcast OPEN_MAPS_KEYBOARD — opening projected keyboard",
-                                always = true
-                            )
-                            openMapsKeyboard(lastMapsCarHost?.get())
-                        }
-                        KeyboardBridge.ACTION_CLOSE_MAPS_KEYBOARD -> {
-                            ModuleLog.maps(
-                                "MAPS-KBD-002",
-                                "broadcast CLOSE_MAPS_KEYBOARD — hiding overlay",
-                                always = true
-                            )
-                            ProjectedKeyboardOverlay.hideForNavigation()
-                        }
-                        KeyboardBridge.ACTION_SUBMIT_MAPS_SEARCH -> {
-                            val query = intent.getStringExtra(KeyboardBridge.EXTRA_QUERY)?.trim().orEmpty()
-                            if (query.isEmpty()) {
-                                ModuleLog.maps("MAPS-KBD-004", "submit ignored — empty query", always = true)
-                                return
-                            }
-                            ModuleLog.maps(
-                                "MAPS-001",
-                                "broadcast SUBMIT_MAPS_SEARCH — \"$query\"",
-                                always = true
-                            )
-                            submitSearchQuery(query)
-                        }
-                    }
-                }
-            }
-            val filter = IntentFilter().apply {
-                addAction(KeyboardBridge.ACTION_PREPARE_MAPS_IME)
-                addAction(KeyboardBridge.ACTION_OPEN_MAPS_KEYBOARD)
-                addAction(KeyboardBridge.ACTION_CLOSE_MAPS_KEYBOARD)
-                addAction(KeyboardBridge.ACTION_SUBMIT_MAPS_SEARCH)
-            }
-            if (Build.VERSION.SDK_INT >= 33) {
-                app.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
-            } else {
-                app.registerReceiver(receiver, filter)
-            }
-            log("Registered PREPARE + OPEN + CLOSE + SUBMIT Maps keyboard receiver")
-        }.onFailure { log("Failed to register Maps keyboard receiver: ${it.message}") }
-    }
-
-    private fun registerOverlayDismissOnNavigation(app: Application) {
-        runCatching {
-            app.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
-                override fun onActivityCreated(activity: Activity, savedInstanceState: android.os.Bundle?) = Unit
-
-                override fun onActivityStarted(activity: Activity) = Unit
-
-                override fun onActivityResumed(activity: Activity) = Unit
-
-                override fun onActivityPaused(activity: Activity) = Unit
-
-                override fun onActivityStopped(activity: Activity) {
-                    if (!ModulePrefs.isEnabled()) return
-                    if (!isMapsCarUiHost(activity)) return
-                    if (!ProjectedKeyboardOverlay.isVisible()) return
-                    ModuleLog.maps(
-                        "MAPS-KBD-002",
-                        "hide overlay — ${activity.javaClass.simpleName} stopped",
-                        always = true
-                    )
-                    ProjectedKeyboardOverlay.hideForNavigation()
-                }
-
-                override fun onActivitySaveInstanceState(activity: Activity, outState: android.os.Bundle) = Unit
-
-                override fun onActivityDestroyed(activity: Activity) {
-                    if (!ModulePrefs.isEnabled()) return
-                    if (!isMapsCarUiHost(activity)) return
-                    if (!ProjectedKeyboardOverlay.isVisible()) return
-                    ProjectedKeyboardOverlay.hideForNavigation()
-                }
-            })
-            app.registerComponentCallbacks(object : ComponentCallbacks2 {
-                override fun onConfigurationChanged(newConfig: Configuration) {
-                    if (!ModulePrefs.isEnabled()) return
-                    if (!ProjectedKeyboardOverlay.isVisible()) return
-                    ModuleLog.maps(
-                        "MAPS-KBD-002",
-                        "hide overlay — application configuration changed",
-                        always = true
-                    )
-                    ProjectedKeyboardOverlay.hideForNavigation()
-                }
-
-                override fun onLowMemory() = Unit
-
-                override fun onTrimMemory(level: Int) = Unit
-            })
-            log("Registered overlay dismiss on navigation / layout change")
-        }.onFailure { log("Failed to register overlay dismiss lifecycle: ${it.message}") }
-    }
-
-    private fun isMapsCarUiHost(activity: Activity): Boolean {
-        val className = activity.javaClass.name
-        if (className.contains("GhostActivity") ||
-            className.contains("biph") ||
-            className.contains("CarApp") ||
-            className.contains("Projection")
-        ) {
-            return true
+    private fun retryDiscoveryIfEmpty(app: Application) {
+        if (discoveryRetried) return
+        val ctx = storedCtx ?: return
+        if (!targets.isEffectivelyEmpty()) return
+        discoveryRetried = true
+        ModuleLog.maps(
+            "MAPS-DRIVE-010",
+            "retrying signature scan after Application.onCreate classLoader=${app.classLoader.javaClass.simpleName}",
+            always = true
+        )
+        MapsSignatureDiscovery.invalidate()
+        targets = MapsSignatureDiscovery.discover(ctx, force = true)
+        if (targets.isEffectivelyEmpty()) {
+            ModuleLog.maps("MAPS-DRIVE-010", "retry scan still found no primary targets", always = true)
+            return
         }
-        val displayId = activity.display?.displayId ?: Display.DEFAULT_DISPLAY
-        return displayId != Display.DEFAULT_DISPLAY
+        installDynamicHooks(ctx)
+        MapsInstallProbe.run(ctx, installAudit, targets)
     }
 
-    /**
-     * kur hint resolver — method name obfuscates between Maps builds (aJ may be absent).
-     * Match static String methods taking Context + multiple boolean flags.
-     */
-    private fun hookSearchHintResolver(ctx: HookContext) {
-        runCatching {
-            val kur = findMapsClass(ctx.classLoader, "kur")
-            val contextClass = android.content.Context::class.java
-            val booleanPrimitive = Boolean::class.javaPrimitiveType!!
-            var hooked = 0
-            for (method in kur.declaredMethods) {
-                if (!java.lang.reflect.Modifier.isStatic(method.modifiers)) continue
-                if (method.returnType != String::class.java) continue
-                val params = method.parameterTypes
-                if (params.isEmpty() || params[0] != contextClass) continue
-                if (params.count { it == booleanPrimitive } < 2) continue
-                HookChains.hookMethod(xposed, method, kurAjHook())
-                if (!kurAjHookLogged) {
-                    kurAjHookLogged = true
-                    val sig = params.joinToString(",") { it.simpleName }
-                    ModuleLog.maps("MAPS-000", "hook kur hint sig=${method.name}($sig)", always = true)
+    private fun installDynamicHooks(ctx: HookContext) {
+        if (installAudit.kurHintHooks == 0 && targets.hintMethods.isNotEmpty()) hookDrivingHintResolver(ctx)
+        if (installAudit.qhfTapHooks == 0 && targets.searchHeaderTaps.isNotEmpty()) {
+            hookSearchHeaderRekCache(ctx)
+            hookSearchBarTap(ctx)
+        }
+        if (targets.rekOverlayTypes.isNotEmpty()) hookRekCache(ctx)
+        if (installAudit.snpHooks == 0 && targets.carImeTypes.isNotEmpty()) hookSnpNativePath(ctx)
+        if (installAudit.trtHooks == 0 && targets.keyboardRestrictedMethods.isNotEmpty()) hookTrtDrivingFlags(ctx)
+        if (installAudit.carParamsHooks == 0 && targets.carParameterMethods.isNotEmpty()) {
+            hookCarParametersKeyboardFlag(ctx)
+        }
+        if (installAudit.voiceBypassHooks == 0 && targets.voiceBypassMethods.isNotEmpty()) {
+            hookMapsVoiceBypass(ctx)
+        }
+        if (targets.headerRestrictionConstructors.isNotEmpty()) {
+            hookHeaderUiState(ctx)
+            hookDistractionState(ctx)
+        }
+        if (installAudit.voiceOnlyPathHooks == 0) hookVoiceOnlyPath(ctx)
+    }
+
+    private fun hookVoiceOnlyPath(ctx: HookContext) {
+        val hooked = MapsVoiceOnlyPathHooks.install(xposed, ctx.classLoader)
+        installAudit.voiceOnlyPathHooks = hooked
+    }
+
+    /** Static String(Context, driving, …) hint resolvers — discovered by signature, not class name. */
+    private fun hookDrivingHintResolver(ctx: HookContext) {
+        var hooked = 0
+        for (method in targets.hintMethods) {
+            val sig = method.parameterTypes.joinToString(",") { it.simpleName }
+            val installed = runCatching {
+                HookChains.hookMethod(xposed, method, kurHintHook(method.name, method.parameterTypes))
+                if (!kurHintHookLogged) {
+                    kurHintHookLogged = true
+                    ModuleLog.maps(
+                        "MAPS-000",
+                        "hook hint sig ${method.declaringClass.simpleName}.${method.name}($sig)",
+                        always = true
+                    )
                 }
-                hooked++
+                log("Hooked hint ${method.declaringClass.simpleName}.${method.name}($sig)")
+                true
+            }.getOrElse { error ->
+                log("hint ${method.declaringClass.simpleName}.${method.name} failed: ${error.message}")
+                false
             }
-            if (hooked == 0) {
-                log("kur hint resolver not found on ${kur.name}")
-            } else {
-                log("Hooked kur hint resolver x$hooked (${kur.name})")
-            }
-        }.onFailure { log("Failed to hook kur hint resolver: ${it.message}") }
-
-        runCatching {
-            HookChains.findAndHookMethod(xposed, android.content.res.Resources::class.java, "getString", object : MethodHook() {
-                    override fun afterHookedMethod(param: HookParam) {
-                        if (!ModulePrefs.isEnabled()) return
-                        val original = param.result as? String ?: return
-                        val rewritten = VoicePlateHints.rewriteIfVoiceOnly(original) ?: return
-                        param.result = rewritten
-                        ModuleLog.maps(
-                            "MAPS-HINT-001",
-                            "Resources.getString rewritten \"${original.take(40)}\" -> \"$rewritten\"",
-                            always = true
-                        )
-                    }
-                }, Int::class.javaPrimitiveType!!)
-            log("Hooked Maps Resources.getString hint rewrite")
-        }.onFailure { log("Failed to hook Maps Resources.getString: ${it.message}") }
+            if (installed) hooked++
+        }
+        installAudit.kurHintHooks = hooked
+        installAudit.kurHasAj = targets.hintMethods.any { it.name == "aJ" }
+        if (hooked == 0) {
+            log("WARN no hint resolver hooked — signature scan found ${targets.hintMethods.size} candidates")
+            ModuleLog.maps(
+                "MAPS-DRIVE-003",
+                "WARN kur hint resolver not hooked — voice label may leak",
+                always = true
+            )
+        } else {
+            log("Hooked hint resolver x$hooked (signature)")
+        }
     }
 
-    private fun kurAjHook() = object : MethodHook() {
+    private fun kurHintHook(methodName: String, params: Array<Class<*>>) = object : MethodHook() {
         override fun beforeHookedMethod(param: HookParam) {
             if (!ModulePrefs.isEnabled()) return
             if (param.args.size < 5) return
-            debugEntry("kur.aJ() driving=${param.args[1]} keyboardBlocked=${param.args.getOrNull(4)}")
+            ModuleLog.maps(
+                "MAPS-DRIVE-006",
+                "kur.$methodName() driving=${param.args[1]} routeSearch=${param.args.getOrNull(2)} " +
+                    "micRestricted=${param.args.getOrNull(4)}",
+                always = ModulePrefs.isDebug()
+            )
+            debugEntry(
+                "kur.$methodName() driving=${param.args[1]} micRestricted=${param.args.getOrNull(4)}"
+            )
             if (param.args[1] == true) {
-                debug("kur.aJ() forced driving=false")
+                debug("kur.$methodName() forced driving=false")
                 param.args[1] = false
             }
+            if (param.args.getOrNull(2) == true) {
+                debug("kur.$methodName() forced routeSearch=false")
+                param.args[2] = false
+            }
             if (param.args.getOrNull(4) == true) {
-                debug("kur.aJ() forced keyboardBlocked=false")
+                debug("kur.$methodName() forced micRestricted=false")
                 param.args[4] = false
             }
         }
@@ -292,165 +217,357 @@ object MapsHooks {
         override fun afterHookedMethod(param: HookParam) {
             if (!ModulePrefs.isEnabled()) return
             val hint = param.result as? String ?: return
-            val rewritten = VoicePlateHints.rewriteIfVoiceOnly(hint) ?: return
-            ModuleLog.maps(
-                "MAPS-HINT-001",
-                "kur.aJ rewritten \"${hint.take(40)}\" -> \"$rewritten\"",
-                always = true
-            )
-            param.result = rewritten
-        }
-    }
-
-    /** qha carries isMicRestricted / isKeyboardRestricted used by qhf tap routing. */
-    private fun hookHeaderUiState(ctx: HookContext) {
-        runCatching {
-            val qha = findMapsClass(ctx.classLoader, "qha")
-            HookChains.hookAllConstructors(xposed, qha, object : MethodHook() {
-                override fun beforeHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    if (param.args.size < 5) return
-                    if (param.args[3] == true) {
-                        debug("qha forced isMicRestricted=false")
-                        param.args[3] = false
-                    }
-                    if (param.args[4] == true) {
-                        debug("qha forced isKeyboardRestricted=false")
-                        param.args[4] = false
-                    }
-                }
-            })
-            log("Hooked qha constructors (${qha.name})")
-        }.onFailure { log("Failed to hook qha: ${it.message}") }
-    }
-
-    /** qwt DistractionState feeds qwv header — force unrestricted for keyboard path. */
-    private fun hookDistractionState(ctx: HookContext) {
-        runCatching {
-            val qwt = findMapsClass(ctx.classLoader, "qwt")
-            HookChains.hookAllConstructors(xposed, qwt, object : MethodHook() {
-                override fun beforeHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    if (param.args.size < 2) return
-                    if (param.args[0] == true) {
-                        debug("qwt forced isKeyboardRestricted=false")
-                        param.args[0] = false
-                    }
-                    if (param.args[1] == true) {
-                        debug("qwt forced isConfigRestricted=false")
-                        param.args[1] = false
-                    }
-                }
-            })
-            log("Hooked qwt constructors (${qwt.name})")
-        }.onFailure { log("Failed to hook qwt: ${it.message}") }
-    }
-
-    private fun hookMapsCarHostCache(ctx: HookContext) {
-        val cacheHook = object : MethodHook() {
-            override fun afterHookedMethod(param: HookParam) {
-                if (!ModulePrefs.isEnabled()) return
-                lastMapsCarHost = WeakReference(param.thisObject)
+            if (hint.contains("voice only", ignoreCase = true)) {
                 ModuleLog.maps(
-                    "MAPS-000",
-                    "cached car host ${param.thisObject?.javaClass?.simpleName}",
+                    "MAPS-DRIVE-001",
+                    "kur.$methodName() returned voice-only hint \"${hint.take(60)}\" — args may still be driving",
                     always = true
                 )
+            } else if (ModulePrefs.isDebug()) {
+                ModuleLog.maps("MAPS-DRIVE-009", "kur.$methodName() hint \"${hint.take(60)}\"")
             }
         }
-        for (shortName in listOf("tur", "tvj", "llj", "biph")) {
+    }
+
+    /** Header UiState ctors with isMicRestricted / isKeyboardRestricted bools (signature). */
+    private fun hookHeaderUiState(ctx: HookContext) {
+        var hooked = 0
+        val booleanPrimitive = Boolean::class.javaPrimitiveType!!
+        for (ctor in targets.headerRestrictionConstructors) {
+            val params = ctor.parameterTypes
+            val isQhaLike = params.size >= 5 &&
+                params[3] == booleanPrimitive &&
+                params[4] == booleanPrimitive
+            if (!isQhaLike) continue
             runCatching {
-                val clazz = findMapsClass(ctx.classLoader, shortName)
-                HookChains.hookAllMethods(xposed, clazz, "onResume", cacheHook)
-                HookChains.hookAllMethods(xposed, clazz, "onStart", cacheHook)
-                log("Hooked ${clazz.simpleName} onResume/onStart host cache")
-            }.onFailure { debug("Skip ${shortName} lifecycle: ${it.message}") }
+                HookChains.hookExecutable(xposed, ctor, object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        if (param.args.size >= 5) {
+                            if (param.args[3] == true) {
+                                debug("header ctor forced isMicRestricted=false")
+                                param.args[3] = false
+                            }
+                            if (param.args[4] == true) {
+                                debug("header ctor forced isKeyboardRestricted=false")
+                                param.args[4] = false
+                            }
+                        }
+                    }
+
+                    override fun afterHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        val summary = param.args.mapIndexed { index, value ->
+                            "$index:${value?.javaClass?.simpleName}=$value"
+                        }.joinToString(" ")
+                        ModuleLog.maps(
+                            "MAPS-DRIVE-005",
+                            "${ctor.declaringClass.simpleName} constructed [$summary]",
+                            always = true
+                        )
+                    }
+                })
+                hooked++
+            }.onFailure { debug("header ctor hook failed: ${it.message}") }
         }
-        runCatching {
-            val llj = findMapsClass(ctx.classLoader, "llj")
-            HookChains.hookAllMethods(xposed, llj, "c", cacheHook)
-            log("Hooked llj.c onCreate host cache (${llj.name})")
-        }.onFailure { debug("Skip llj.c host cache: ${it.message}") }
+        if (hooked > 0) {
+            log("Hooked header restriction ctors x$hooked (signature)")
+        } else {
+            log("WARN no header restriction ctors hooked")
+        }
     }
 
-    /**
-     * Voice search IPC: Bundle gmm_mic=true → lka.z(1) → gearhead kcw.k(10).
-     * pub.s() is not always on the call stack; intercept the binder transaction.
-     */
-    private fun hookGmmMicBinder(ctx: HookContext) {
-        val gmmMicPassthrough = object : MethodHook() {
-            override fun beforeHookedMethod(param: HookParam) {
-                if (!ModulePrefs.isEnabled()) return
-                if (param.args[0] as Int != 1) return
-                if (mapsMicVoiceActive.get() != true) {
-                    pendingGmmMic.remove()
-                    return
-                }
-                pendingGmmMic.remove()
-                mapsMicVoiceActive.remove()
-                ModuleLog.maps("MAPS-MIC-001", "lka.${param.method.name}(1) gmm_mic — voice passthrough", always = true)
-                notifyGearheadMapsMicVoice()
+    private fun hookDistractionState(ctx: HookContext) {
+        var hooked = 0
+        val booleanPrimitive = Boolean::class.javaPrimitiveType!!
+        for (ctor in targets.headerRestrictionConstructors) {
+            val params = ctor.parameterTypes
+            val isQwtLike = params.size >= 2 &&
+                params[0] == booleanPrimitive &&
+                params[1] == booleanPrimitive &&
+                params.size < 5
+            if (!isQwtLike) continue
+            runCatching {
+                HookChains.hookExecutable(xposed, ctor, object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        if (param.args[0] == true) {
+                            debug("distraction ctor forced isKeyboardRestricted=false")
+                            param.args[0] = false
+                        }
+                        if (param.args[1] == true) {
+                            debug("distraction ctor forced isConfigRestricted=false")
+                            param.args[1] = false
+                        }
+                    }
+                })
+                hooked++
             }
         }
-
-        runCatching {
-            HookChains.hookAllMethods(xposed, android.os.Bundle::class.java, "putBoolean", object : MethodHook() {
-                override fun afterHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    if (param.args[0] == "gmm_mic" && param.args[1] == true) {
-                        pendingGmmMic.set(true)
-                    }
-                }
-            })
-            log("Hooked Bundle.putBoolean gmm_mic tracker")
-        }.onFailure { log("Failed to hook Bundle.putBoolean: ${it.message}") }
-
-        runCatching {
-            val lkc = findMapsClass(ctx.classLoader, "lkc")
-            HookChains.hookAllMethods(xposed, lkc, "f", object : MethodHook() {
-                override fun beforeHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    if (param.args.size < 2) return
-                    val bundle = param.args[1] as? android.os.Bundle ?: return
-                    if (bundle.getBoolean("gmm_mic")) {
-                        pendingGmmMic.set(true)
-                        ModuleLog.maps("MAPS-000", "lkc.f gmm_mic bundle detected", always = true)
-                    }
-                }
-            })
-            log("Hooked lkc.f gmm_mic tracker (${lkc.name})")
-        }.onFailure { log("Failed to hook lkc.f: ${it.message}") }
-
-        runCatching {
-            val lka = findMapsClass(ctx.classLoader, "lka")
-            HookChains.hookAllMethods(xposed, lka, "z", gmmMicPassthrough)
-            HookChains.hookAllMethods(xposed, lka, "A", gmmMicPassthrough)
-            log("Hooked lka.z/A gmm_mic mic passthrough (${lka.name})")
-        }.onFailure { log("Failed to hook lka.z/A: ${it.message}") }
+        if (hooked > 0) {
+            log("Hooked distraction ctors x$hooked (signature)")
+        }
     }
 
-    /**
-     * pub.s() on tur/tvj is the Maps header mic — always passthrough; notify gearhead before gmm_mic IPC.
-     */
-    private fun hookPubVoiceSearch(ctx: HookContext) {
-        val micPassthroughHook = object : MethodHook() {
+    private fun hookRekCache(ctx: HookContext) {
+        var hooked = 0
+        for (rekType in targets.rekOverlayTypes) {
+            runCatching {
+                HookChains.hookAllConstructors(xposed, rekType, object : MethodHook() {
+                    override fun afterHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        lastRek = WeakReference(param.thisObject)
+                        debugEntry("${rekType.simpleName} constructed — cached rek")
+                    }
+                })
+                val bindHandles = HookChains.hookAllMethods(xposed, rekType, "d", object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        lastRek = WeakReference(param.thisObject)
+                        debugEntry("${rekType.simpleName}.d() cached rek overlay")
+                    }
+                })
+                if (bindHandles.isNotEmpty()) hooked++
+            }.onFailure { debug("rek cache ${rekType.name} failed: ${it.message}") }
+        }
+        if (hooked > 0) {
+            log("Hooked rek overlay types x$hooked (signature)")
+        } else {
+            log("WARN no rek overlay types hooked")
+        }
+    }
+
+    private fun hookSearchHeaderRekCache(ctx: HookContext) {
+        var hooked = 0
+        val headerClasses = targets.searchHeaderTaps.map { it.headerClass }.distinct()
+        for (headerClass in headerClasses) {
+            runCatching {
+                HookChains.hookAllConstructors(xposed, headerClass, object : MethodHook() {
+                    override fun afterHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        val header = param.thisObject ?: return
+                        cacheRekFromHeader(header)?.let {
+                            ModuleLog.maps(
+                                "MAPS-000",
+                                "cached rek from ${headerClass.simpleName} constructor",
+                                always = true
+                            )
+                        }
+                    }
+                })
+                hooked++
+            }
+        }
+        if (hooked > 0) {
+            log("Hooked search header ctors x$hooked (signature)")
+        }
+    }
+
+    private fun hookSnpNativePath(ctx: HookContext) {
+        var hooked = 0
+        for (snpType in targets.carImeTypes) {
+            for (methodName in listOf("j", "k")) {
+                val handles = HookChains.hookAllMethods(xposed, snpType, methodName, object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        lastSnp = WeakReference(param.thisObject)
+                        ModuleLog.maps(
+                            "MAPS-003",
+                            "${snpType.simpleName}.$methodName() native car IME path",
+                            always = true
+                        )
+                    }
+                })
+                hooked += handles.size
+            }
+        }
+        installAudit.snpHooks = hooked
+        if (hooked > 0) {
+            log("Hooked car IME j/k x$hooked (signature)")
+        } else {
+            log("WARN no car IME j/k hooked")
+        }
+    }
+
+    /** Search bar tap: discovered header.l() → rek.d(). */
+    private fun hookSearchBarTap(ctx: HookContext) {
+        val classLoader = ctx.classLoader
+        val micPassthrough = object : MethodHook() {
             override fun beforeHookedMethod(param: HookParam) {
                 if (!ModulePrefs.isEnabled()) return
                 mapsMicVoiceActive.set(true)
-                pendingGmmMic.remove()
-                notifyGearheadMapsMicVoice()
-                ModuleLog.maps(
-                    "MAPS-MIC-001",
-                    "${param.thisObject?.javaClass?.simpleName}.s() mic voice allowed",
-                    always = true
-                )
+                ModuleLog.maps("MAPS-MIC-001", "${param.method.declaringClass.simpleName}.${param.method.name}() mic", always = true)
             }
 
             override fun afterHookedMethod(param: HookParam) {
                 mapsMicVoiceActive.remove()
             }
         }
+        var hookedL = 0
+        for (tap in targets.searchHeaderTaps) {
+            val keyboardTap = object : MethodHook() {
+                override fun beforeHookedMethod(param: HookParam) {
+                    if (!ModulePrefs.isEnabled()) return
+                    val headerClass = param.thisObject?.javaClass?.name ?: "?"
+                    ModuleLog.maps("MAPS-DRIVE-006", "$headerClass.${tap.tapMethod.name}() search tap", always = true)
+                    val rek = runCatching {
+                        Reflect.getObjectField(param.thisObject, tap.rekFieldName)
+                    }.getOrNull() ?: MapsSignatureDiscovery.findRekFieldOnHeader(param.thisObject!!)?.second
+                    if (rek == null) {
+                        ModuleLog.maps("MAPS-004", "search tap rek field null on ${tap.headerClass.simpleName}", always = true)
+                        return
+                    }
+                    ModuleLog.maps(
+                        "MAPS-001",
+                        "${tap.headerClass.simpleName}.${tap.tapMethod.name}() — native rek.d keyboard",
+                        always = true
+                    )
+                    openNativeKeyboard(rek)
+                    param.result = runCatching { blhxDone(classLoader, tap.tapMethod.returnType) }.getOrNull()
+                }
+            }
+            runCatching {
+                HookChains.hookMethod(xposed, tap.tapMethod, keyboardTap)
+                log("Hooked ${tap.headerClass.simpleName}.${tap.tapMethod.name}() rekField=${tap.rekFieldName}")
+                hookedL++
+            }.onFailure { log("tap hook ${tap.headerClass.simpleName}.l failed: ${it.message}") }
+            for (methodName in listOf("k", "i")) {
+                runCatching {
+                    HookChains.hookAllMethods(xposed, tap.headerClass, methodName, micPassthrough)
+                }
+            }
+        }
+        installAudit.qhfTapHooks = hookedL
+        installAudit.qhfHasL = hookedL > 0
+        installAudit.qhfIsInterface = false
+        if (hookedL == 0) {
+            log("Failed to hook search header tap — ${targets.searchHeaderTaps.size} signature candidates")
+        } else {
+            log("Hooked search header tap x$hookedL (signature)")
+        }
+    }
 
+    private fun hookTrtDrivingFlags(ctx: HookContext) {
+        val hook = object : MethodHook() {
+            override fun afterHookedMethod(param: HookParam) {
+                if (!ModulePrefs.isEnabled()) return
+                if (param.result == true) {
+                    ModuleLog.maps(
+                        "MAPS-DRIVE-004",
+                        "${param.thisObject?.javaClass?.simpleName}.${param.method.name}() forced false",
+                        always = true
+                    )
+                    param.result = false
+                }
+            }
+        }
+        var totalHooked = 0
+        for (method in targets.keyboardRestrictedMethods) {
+            runCatching {
+                HookChains.hookMethod(xposed, method, hook)
+                totalHooked++
+            }
+        }
+        installAudit.trtHooks = totalHooked
+        if (totalHooked > 0) {
+            log("Hooked keyboard-restricted methods x$totalHooked (signature)")
+        } else {
+            log("WARN no keyboard-restricted methods hooked")
+        }
+    }
+
+    private fun hookCarParametersKeyboardFlag(ctx: HookContext) {
+        val hook = object : MethodHook() {
+            override fun afterHookedMethod(param: HookParam) {
+                if (!ModulePrefs.isEnabled()) return
+                val carParams = param.result ?: return
+                if (!MapsSignatureDiscovery.isCarParamsType(carParams.javaClass)) return
+                patchCarParamsFlags(carParams)
+            }
+        }
+        var hooked = 0
+        for (method in targets.carParameterMethods) {
+            runCatching {
+                HookChains.hookMethod(xposed, method, hook)
+                log("Hooked car params ${method.declaringClass.simpleName}.${method.name}()")
+                hooked++
+            }
+        }
+        installAudit.carParamsHooks = hooked
+        if (hooked > 0) {
+            log("Hooked getCarParameters-like x$hooked (signature)")
+        } else {
+            log("WARN no car parameter getters hooked")
+        }
+    }
+
+    private fun patchCarParamsFlags(carParams: Any) {
+        runCatching {
+            for (field in carParams.javaClass.declaredFields) {
+                if (Modifier.isStatic(field.modifiers)) continue
+                if (field.type != Boolean::class.javaPrimitiveType && field.type != Boolean::class.java) continue
+                field.isAccessible = true
+                when (field.name) {
+                    "A" -> if (!field.getBoolean(carParams)) {
+                        field.setBoolean(carParams, true)
+                        debug("carParams.A forced true")
+                    }
+                    "c" -> if (field.getBoolean(carParams)) {
+                        field.setBoolean(carParams, false)
+                        debug("carParams.c forced false")
+                    }
+                }
+            }
+        }.onFailure { debug("carParams flag patch failed: ${it.message}") }
+    }
+
+    /**
+     * AA search can bypass qhf via NavAssistantCallbacks gRPC (aoeb.l).
+     * Redirect to native keyboard instead of voice dictation.
+     */
+    private fun hookMapsVoiceBypass(ctx: HookContext) {
+        val redirect = object : MethodHook() {
+            override fun beforeHookedMethod(param: HookParam) {
+                if (!ModulePrefs.isEnabled()) return
+                if (mapsMicVoiceActive.get() == true) return
+                val trigger = param.args.getOrNull(0) as? Int
+                ModuleLog.maps(
+                    "MAPS-001",
+                    "${param.method.declaringClass.simpleName}.${param.method.name}($trigger) voice bypass blocked",
+                    always = true
+                )
+                openNativeKeyboardIfReady()
+                param.result = null
+            }
+        }
+        var voiceHooked = 0
+        for (method in targets.voiceBypassMethods) {
+            runCatching {
+                HookChains.hookMethod(xposed, method, redirect)
+                log("Hooked voice bypass ${method.declaringClass.simpleName}.${method.name}(int)")
+                voiceHooked++
+            }
+        }
+        installAudit.voiceBypassHooks = voiceHooked
+        if (voiceHooked == 0) {
+            log("WARN no voice bypass methods hooked")
+        }
+    }
+
+    /**
+     * Head-unit search may call tur.s() → gmm_mic IPC. Trace only — mic uses the same entry.
+     */
+    private fun hookTurNavSearch(ctx: HookContext) {
+        val trace = object : MethodHook() {
+            override fun beforeHookedMethod(param: HookParam) {
+                if (!ModulePrefs.isEnabled()) return
+                ModuleLog.maps(
+                    "MAPS-DRIVE-006",
+                    "${param.thisObject?.javaClass?.simpleName}.s() micActive=${mapsMicVoiceActive.get() == true}",
+                    always = ModulePrefs.isDebug()
+                )
+            }
+        }
         var hooked = 0
         runCatching {
             val pub = findMapsClass(ctx.classLoader, "pub")
@@ -458,598 +575,451 @@ object MapsHooks {
                 runCatching {
                     val clazz = findMapsClass(ctx.classLoader, shortName)
                     if (!pub.isAssignableFrom(clazz)) return@runCatching
-                    HookChains.hookAllMethods(xposed, clazz, "s", micPassthroughHook)
-                    log("Hooked ${clazz.simpleName}.s (mic passthrough)")
-                    hooked++
+                    hooked += HookChains.hookAllMethods(xposed, clazz, "s", trace).size
                 }
             }
-        }.onFailure { log("Failed to hook pub.s candidates: ${it.message}") }
-
+        }.onFailure { debug("Skip pub.s trace: ${it.message}") }
         if (hooked == 0) {
             runCatching {
                 val tur = findMapsClass(ctx.classLoader, "tur")
-                HookChains.hookAllMethods(xposed, tur, "s", micPassthroughHook)
-                log("Hooked tur.s fallback mic passthrough (${tur.name})")
-            }.onFailure { log("Failed to hook tur.s fallback: ${it.message}") }
+                hooked = HookChains.hookAllMethods(xposed, tur, "s", trace).size
+            }.onFailure { debug("Skip tur.s trace: ${it.message}") }
+        }
+        if (hooked > 0) {
+            log("Hooked tur.s trace x$hooked")
         }
     }
 
-    private fun openMapsKeyboard(host: Any? = null) {
-        if (ProjectedKeyboardOverlay.toggleIfVisible()) {
-            ModuleLog.maps("MAPS-KBD-002", "keyboard toggle — closed overlay", always = true)
-            return
-        }
-        if (ProjectedKeyboardOverlay.shouldSuppressNextOpen()) {
-            ModuleLog.maps(
-                "MAPS-KBD-002",
-                "open suppressed after toggle-close (trailing OPEN broadcast)",
-                always = true
+    /** Trace voice-only resource loads — no string rewrite. */
+    private fun hookDrivingResourceTrace(ctx: HookContext) {
+        runCatching {
+            HookChains.findAndHookMethod(
+                xposed,
+                android.content.res.Resources::class.java,
+                "getString",
+                object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        val resId = param.args[0] as? Int ?: return
+                        if (resId != MapsInstallProbe.voiceOnlyResId || resId == 0) return
+                        ModuleLog.maps(
+                            "MAPS-DRIVE-008",
+                            "voiceOnly getString caller=${MapsDrivingTrace.formatCallerStack()}",
+                            always = true
+                        )
+                    }
+
+                    override fun afterHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        val resId = param.args[0] as? Int ?: return
+                        val voiceId = MapsInstallProbe.voiceOnlyResId
+                        val searchId = MapsInstallProbe.searchHintResId
+                        if (voiceId == 0 && searchId == 0) return
+                        if (resId != voiceId && resId != searchId) return
+                        val text = param.result as? String ?: return
+                        val kind = if (resId == voiceId) "voiceOnly" else "searchHint"
+                        val stack = MapsDrivingTrace.formatCallerStack()
+                        ModuleLog.maps(
+                            "MAPS-DRIVE-008",
+                            "$kind resId=$resId text=\"${text.take(50)}\" stack=$stack",
+                            always = true
+                        )
+                    }
+                },
+                Int::class.javaPrimitiveType!!,
             )
-            return
-        }
+            log("Hooked Resources.getString driving trace (no rewrite)")
+        }.onFailure { log("Failed to hook Resources.getString trace: ${it.message}") }
+    }
 
-        val carHost = resolveMapsCarHost(host)
-
-        lastSnp?.get()?.let { snp ->
-            runCatching {
-                Reflect.callMethod(snp, "k")
-                ModuleLog.maps("MAPS-003", "snp.k() invoked directly", always = true)
-                return
-            }.onFailure {
-                ModuleLog.maps("MAPS-004", "snp.k() failed: ${it.message}", always = true)
-            }
-        }
-
-        val rek = discoverRekOverlay() ?: lastRel?.get()
-        if (rek != null) {
-            openProjectedKeyboard(rek)
-            return
-        }
-
-        if (carHost != null) {
-            ModuleLog.maps(
-                "MAPS-002",
-                "attempt dispatchKeyEvent keyboard on ${carHost.javaClass.simpleName}",
-                always = true
-            )
-            runCatching {
-                val activity = carHost as? android.app.Activity
-                val content = activity?.findViewById<View>(android.R.id.content)
-                    ?: (carHost as? View)
-                val keyEvent = KeyEvent(KeyEvent.ACTION_UP, 22)
-                if (content?.dispatchKeyEvent(keyEvent) == true) {
-                    ModuleLog.maps("MAPS-003", "dispatchKeyEvent(KEYCODE=22) consumed", always = true)
-                    return
+    private fun hookLazyImeReceiverRegistration(ctx: HookContext) {
+        if (ctx.processName != "com.google.android.apps.maps") return
+        runCatching {
+            HookChains.findAndHookMethod(xposed, Application::class.java, "onCreate", object : MethodHook() {
+                override fun afterHookedMethod(param: HookParam) {
+                    val app = param.thisObject as Application
+                    MapsInstallProbe.resolveFromApplication(app, app.packageName)
+                    retryDiscoveryIfEmpty(app)
+                    ensureNativeImeReceiver(app)
                 }
-                ModuleLog.maps("MAPS-004", "dispatchKeyEvent(KEYCODE=22) not consumed", always = true)
-            }.onFailure {
-                ModuleLog.maps("MAPS-004", "dispatchKeyEvent failed: ${it.message}", always = true)
-            }
+            })
+            log("Hooked Application.onCreate for IME receiver")
+        }.onFailure { log("Failed to hook Application.onCreate: ${it.message}") }
 
-            val activity = carHost as? android.app.Activity
-            val ctx = activity ?: runCatching {
-                Class.forName("android.app.ActivityThread")
-                    .getMethod("currentApplication")
-                    .invoke(null) as Context
-            }.getOrNull()
-            if (ctx != null) {
-                ModuleLog.maps(
-                    "MAPS-KBD-001",
-                    "stock keyboard failed — showing custom QWERTY in Maps process",
-                    always = true
-                )
-                ProjectedKeyboardOverlay.show(
-                    context = ctx,
-                    onSubmit = { query -> MapsSearchSubmit.submit(ctx, query) },
-                    preferredDisplay = activity?.display,
-                    hostActivity = activity
-                )
-            }
-            return
-        }
+        runCatching {
+            HookChains.findAndHookMethod(xposed, Activity::class.java, "onResume", object : MethodHook() {
+                override fun afterHookedMethod(param: HookParam) {
+                    val activity = param.thisObject as Activity
+                    if (!activity.javaClass.name.contains("GhostActivity")) return
+                    ensureNativeImeReceiver(activity.application)
+                    resolveRek()
+                }
+            })
+            log("Hooked Activity.onResume for GhostActivity IME receiver")
+        }.onFailure { log("Failed to hook Activity.onResume: ${it.message}") }
 
-        ModuleLog.maps("MAPS-004", "no rek overlay or car host for keyboard open", always = true)
+        ensureNativeImeReceiver()
     }
 
-    /** Proactive bind: rel.d → snp.j before gearhead opens xcu/xdb. */
-    private fun prepareMapsIme() {
-        resolveMapsCarHost(lastMapsCarHost?.get())
-        discoverRekOverlay()?.let { rek ->
-            ModuleLog.maps("MAPS-002", "PREPARE — rel.d bind chain", always = true)
-            openProjectedKeyboard(rek)
+    private fun ensureNativeImeReceiver(app: Application? = null) {
+        if (imeReceiverRegistered) return
+        val application = app ?: runCatching {
+            val atClass = Class.forName("android.app.ActivityThread")
+            Reflect.callStaticMethod(atClass, "currentApplication") as? Application
+        }.getOrNull() ?: return
+
+        runCatching {
+            val filter = IntentFilter().apply {
+                addAction(MapsNativeIme.ACTION_PREPARE)
+                addAction(MapsNativeIme.ACTION_OPEN)
+            }
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(context: Context, intent: Intent) {
+                    if (!ModulePrefs.isEnabled()) return
+                    when (intent.action) {
+                        MapsNativeIme.ACTION_PREPARE -> {
+                            ModuleLog.maps("MAPS-002", "broadcast PREPARE_MAPS_NATIVE_IME", always = true)
+                            Handler(Looper.getMainLooper()).post {
+                                prepareNativeKeyboardBind()
+                            }
+                        }
+                        MapsNativeIme.ACTION_OPEN -> {
+                            ModuleLog.maps("MAPS-001", "broadcast OPEN_MAPS_NATIVE_IME", always = true)
+                            scheduleOpenNativeKeyboard()
+                        }
+                    }
+                }
+            }
+            if (Build.VERSION.SDK_INT >= 33) {
+                application.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+            } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
+                application.registerReceiver(receiver, filter)
+            }
+            imeReceiverRegistered = true
+            log("Registered native IME broadcast receiver")
+        }.onFailure { log("Failed to register IME receiver: ${it.message}") }
+    }
+
+    private fun scheduleOpenNativeKeyboard() {
+        val attempts = longArrayOf(0L, 150L, 400L, 800L, 1500L, 2500L, 4000L)
+        val handler = Handler(Looper.getMainLooper())
+        for (delayMs in attempts) {
+            handler.postDelayed({
+                if (openNativeKeyboardIfReady()) return@postDelayed
+                if (delayMs == attempts.last()) {
+                    val editText = findGhostSearchEditText()
+                    val ghostActivities = countGhostActivities()
+                    val msg = buildString {
+                        if (editText != null) {
+                            append("search EditText visible but no rek — bind failed")
+                        } else {
+                            append("no cached rek for native keyboard")
+                        }
+                        append("; ghostActivities=$ghostActivities qhfTapHooks=${installAudit.qhfTapHooks}")
+                        append(" kurHooks=${installAudit.kurHintHooks}")
+                    }
+                    ModuleLog.maps("MAPS-004", msg, always = true)
+                }
+            }, delayMs)
+        }
+    }
+
+    private fun countGhostActivities(): Int {
+        return runCatching {
+            val atClass = Class.forName("android.app.ActivityThread")
+            val thread = Reflect.callStaticMethod(atClass, "currentActivityThread")
+            val activities = Reflect.getObjectField(thread, "mActivities") as? Map<*, *> ?: return 0
+            activities.values.count { record ->
+                val activity = Reflect.getObjectField(record, "activity") as? Activity
+                activity?.javaClass?.name?.contains("GhostActivity") == true
+            }
+        }.getOrDefault(0)
+    }
+
+    private fun prepareNativeKeyboardBind() {
+        resolveRek()?.let { rek ->
+            runCatching {
+                Reflect.callMethod(rek, "d")
+                ModuleLog.maps("MAPS-002", "PREPARE rek.d() native keyboard bind", always = true)
+            }.onFailure {
+                ModuleLog.maps("MAPS-004", "PREPARE rek.d() failed: ${it.message}", always = true)
+            }
+            invokeSnpBindIfPresent()
             return
         }
-        lastRel?.get()?.let { rek ->
-            ModuleLog.maps("MAPS-002", "PREPARE — cached rel.d bind chain", always = true)
-            openProjectedKeyboard(rek)
-            return
-        }
+        ModuleLog.maps("MAPS-004", "PREPARE no rek — trying stock tap path", always = true)
+        tryStockSearchTapPath(bindOnly = true)
+    }
+
+    private fun invokeSnpBindIfPresent() {
         lastSnp?.get()?.let { snp ->
             runCatching {
                 Reflect.callMethod(snp, "j")
-                ModuleLog.maps("MAPS-003", "PREPARE — snp.j() on cached snp", always = true)
+                ModuleLog.maps("MAPS-003", "snp.j() bind car input", always = true)
             }.onFailure {
-                ModuleLog.maps("MAPS-004", "PREPARE snp.j failed: ${it.message}", always = true)
+                ModuleLog.maps("MAPS-004", "snp.j() failed: ${it.message}", always = true)
             }
-            runCatching {
+        }
+    }
+
+    private fun invokeSnpShowIfPresent(): Boolean {
+        lastSnp?.get()?.let { snp ->
+            return runCatching {
                 Reflect.callMethod(snp, "k")
-                ModuleLog.maps("MAPS-003", "PREPARE — snp.k() on cached snp", always = true)
-            }.onFailure {
-                ModuleLog.maps("MAPS-004", "PREPARE snp.k failed: ${it.message}", always = true)
+                ModuleLog.maps("MAPS-003", "snp.k() show car IME", always = true)
+                true
+            }.getOrElse {
+                ModuleLog.maps("MAPS-004", "snp.k() failed: ${it.message}", always = true)
+                false
             }
-            return
         }
-        ModuleLog.maps("MAPS-004", "PREPARE — no rek overlay (discover via qhf/activity scan failed)", always = true)
+        return false
     }
 
-    /** Find rek via qhf.b field on live activities when lastRel is empty. */
-    private fun notifyGearheadMapsMicVoice() {
-        runCatching {
-            val app = Class.forName("android.app.ActivityThread")
-                .getMethod("currentApplication")
-                .invoke(null) as android.app.Application
-            MicSignal.signalMapsMicVoice(app)
-            val intent = Intent(KeyboardBridge.ACTION_MAPS_MIC_VOICE)
-                .setPackage("com.google.android.projection.gearhead")
-            app.sendBroadcast(intent)
-        }.onFailure {
-            ModuleLog.maps("MAPS-004", "MAPS_MIC_VOICE broadcast failed: ${it.message}", always = true)
+    private fun openNativeKeyboardIfReady(): Boolean {
+        resolveRek()?.let { rek ->
+            openNativeKeyboard(rek)
+            return true
         }
+        return tryStockSearchTapPath(bindOnly = false)
     }
 
-    private fun discoverRekOverlay(): Any? {
-        val classLoader = mapsClassLoader ?: return null
-        val rekClass = runCatching { findMapsClass(classLoader, "rek") }.getOrNull() ?: return null
-        val qhfClass = runCatching { findMapsClass(classLoader, "qhf") }.getOrNull()
+    private fun resolveRek(): Any? {
+        lastRek?.get()?.let { return it }
+        return discoverRekInProcess()?.also { lastRek = WeakReference(it) }
+    }
+
+    private fun discoverRekInProcess(): Any? {
         runCatching {
             val atClass = Class.forName("android.app.ActivityThread")
-            val at = Reflect.callStaticMethod(atClass, "currentActivityThread")
-            val app = Reflect.callStaticMethod(atClass, "currentApplication") ?: return@runCatching
-            scanForRek(app, rekClass, qhfClass)?.let { return it }
-            val activities = Reflect.getObjectField(at, "mActivities") as? Map<*, *> ?: return null
+            val thread = Reflect.callStaticMethod(atClass, "currentActivityThread")
+            val activities = Reflect.getObjectField(thread, "mActivities") as? Map<*, *> ?: return null
             for (record in activities.values) {
-                val activity = Reflect.getObjectField(record, "activity") ?: continue
-                scanForRek(activity, rekClass, qhfClass)?.let { rek ->
-                    lastRel = WeakReference(rek)
+                val activity = Reflect.getObjectField(record, "activity") as? Activity ?: continue
+                if (!activity.javaClass.name.contains("GhostActivity")) continue
+
+                findSearchEditText(activity)?.let { editText ->
+                    scanForRekMatchingEditText(activity, editText, depth = 0, maxDepth = 7)?.let { rek ->
+                        ModuleLog.maps(
+                            "MAPS-000",
+                            "discovered rek via search EditText (${rek.javaClass.simpleName})",
+                            always = true
+                        )
+                        return rek
+                    }
+                    ModuleLog.maps("MAPS-000", "search EditText visible — scanning for rek", always = true)
+                }
+
+                discoverQhfHeader(activity)?.let { qhf ->
+                    cacheRekFromQhf(qhf)?.let { rek ->
+                        ModuleLog.maps("MAPS-000", "discovered rek via qhf.b", always = true)
+                        return rek
+                    }
+                }
+
+                scanForRek(activity, depth = 0, maxDepth = 7)?.let { rek ->
                     ModuleLog.maps(
-                        "MAPS-002",
-                        "discovered rek overlay via ${activity.javaClass.simpleName}",
+                        "MAPS-000",
+                        "discovered rek via activity scan (${rek.javaClass.simpleName})",
                         always = true
                     )
                     return rek
                 }
             }
         }.onFailure {
-            ModuleLog.maps("MAPS-004", "rek discovery scan failed: ${it.message}", always = true)
+            debug("discoverRek failed: ${it.message}")
         }
         return null
     }
 
-    private fun scanForRek(root: Any, rekClass: Class<*>, qhfClass: Class<*>?): Any? {
-        if (rekClass.isInstance(root)) return root
-        if (qhfClass != null && qhfClass.isInstance(root)) {
-            runCatching {
-                val rek = Reflect.getObjectField(root, "b")
-                if (rek != null && rekClass.isInstance(rek)) return rek
-            }
-        }
-        for (field in root.javaClass.declaredFields) {
-            if (field.type.isPrimitive) continue
-            runCatching {
-                field.isAccessible = true
-                val value = field.get(root) ?: return@runCatching
-                if (rekClass.isInstance(value)) return value
-                if (qhfClass != null && qhfClass.isInstance(value)) {
-                    val rek = Reflect.getObjectField(value, "b")
-                    if (rek != null && rekClass.isInstance(rek)) return rek
-                }
-            }
-        }
-        return null
-    }
-
-    private fun resolveMapsCarHost(host: Any?): Any? {
-        host?.let {
-            lastMapsCarHost = WeakReference(it)
-            return it
-        }
-        lastMapsCarHost?.get()?.let { return it }
-        return findMapsCarActivity()
-    }
-
-    private fun findMapsCarActivity(): Any? {
+    private fun findGhostSearchEditText(): View? {
         runCatching {
             val atClass = Class.forName("android.app.ActivityThread")
-            val at = Reflect.callStaticMethod(atClass, "currentActivityThread")
-            val activities = Reflect.getObjectField(at, "mActivities") as? Map<*, *> ?: return null
+            val thread = Reflect.callStaticMethod(atClass, "currentActivityThread")
+            val activities = Reflect.getObjectField(thread, "mActivities") as? Map<*, *> ?: return null
             for (record in activities.values) {
-                val activity = Reflect.getObjectField(record, "activity") ?: continue
-                val name = activity.javaClass.name
-                if (name.contains("tur") || name.contains("tvj") || name.contains("llj") ||
-                    name.contains("biph") || name.contains("GhostActivity") || name.contains("qhf")
-                ) {
-                    lastMapsCarHost = WeakReference(activity)
-                    ModuleLog.maps("MAPS-002", "discovered car activity $name", always = true)
-                    return activity
-                }
+                val activity = Reflect.getObjectField(record, "activity") as? Activity ?: continue
+                if (!activity.javaClass.name.contains("GhostActivity")) continue
+                findSearchEditText(activity)?.let { return it }
             }
-        }.onFailure {
-            ModuleLog.maps("MAPS-004", "activity scan failed: ${it.message}", always = true)
         }
         return null
     }
 
-    /**
-     * Search bar: qhf.l() → rek.d keyboard. Mic: qhf.k()/i() → pub.s voice (left alone).
-     */
-    private fun hookSearchBarTap(ctx: HookContext) {
-        runCatching {
-            val qhf = findMapsClass(ctx.classLoader, "qhf")
-            val blhxDone = runCatching { blhxDone(ctx) }.getOrNull()
-            val keyboardTap = object : MethodReplacement() {
-                override fun replaceHookedMethod(param: HookParam): Any? {
-                    if (!ModulePrefs.isEnabled()) {
-                        return HookChains.invokeOriginal(xposed, param)
-                    }
-                    ModuleLog.maps("MAPS-001", "qhf.l() search tap — opening projected keyboard", always = true)
-                    val rek = Reflect.getObjectField(param.thisObject, "b") ?: return blhxDone
-                    openProjectedKeyboard(rek)
-                    return blhxDone
-                }
-            }
-            val micPassthrough = object : MethodHook() {
-                override fun beforeHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    mapsMicVoiceActive.set(true)
-                    ModuleLog.maps("MAPS-MIC-001", "qhf.${param.method.name}() mic voice", always = true)
-                }
-
-                override fun afterHookedMethod(param: HookParam) {
-                    mapsMicVoiceActive.remove()
-                }
-            }
-            HookChains.hookAllMethods(xposed, qhf, "l", keyboardTap)
-            for (method in listOf("k", "i")) {
-                HookChains.hookAllMethods(xposed, qhf, method, micPassthrough)
-            }
-            log("Hooked qhf.l keyboard + qhf.k/i mic (${qhf.name})")
-        }.onFailure { log("Failed to hook qhf tap methods: ${it.message}") }
-    }
-
-    /**
-     * Maps-only voice dictation block (gearhead voice assistant hooks stay disabled).
-     * AA search often uses NavAssistantCallbacks gRPC → aoeb.l → voice session, bypassing qhf.
-     */
-    private fun hookMapsVoiceSession(ctx: HookContext) {
-        runCatching {
-            val aoeb = findMapsClass(ctx.classLoader, "aoeb")
-            HookChains.findAndHookMethod(xposed, aoeb, "l", object : MethodHook() {
-                override fun beforeHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    val trigger = param.args[0] as Int
-                    ModuleLog.maps("MAPS-001", "aoeb.l($trigger) blocked — opening projected keyboard", always = true)
-                    openFromLastRel()
-                    param.result = null
-                }
-            }, Int::class.javaPrimitiveType!!)
-            log("Hooked aoeb.l (${aoeb.name})")
-        }.onFailure { log("Failed to hook aoeb.l: ${it.message}") }
-
-        runCatching {
-            val aodo = findMapsClass(ctx.classLoader, "aodo")
-            HookChains.findAndHookMethod(xposed, aodo, "m", object : MethodHook() {
-                override fun beforeHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    ModuleLog.maps("MAPS-001", "aodo.m(${param.args[0]}) blocked voice session", always = true)
-                    openFromLastRel()
-                    param.result = null
-                }
-            }, Int::class.javaPrimitiveType!!)
-            log("Hooked aodo.m (${aodo.name})")
-        }.onFailure { log("Failed to hook aodo.m: ${it.message}") }
-    }
-
-    /**
-     * Car head-unit touches are injected via [biug.c] into Maps' map [Presentation] (biqv),
-     * not into our keyboard [Presentation]. Steer them to the overlay while it is visible.
-     */
-    private fun hookMapsCarTouchIntercept(ctx: HookContext) {
-        val intercept = object : MethodHook() {
-            override fun beforeHookedMethod(param: HookParam) {
-                if (!ModulePrefs.isEnabled()) return
-                if (!ProjectedKeyboardOverlay.isVisible()) return
-                val motionEvent = param.args[0] as? MotionEvent ?: return
-                if (ProjectedKeyboardOverlay.dispatchCarTouch(motionEvent)) {
-                    param.result = Pair.create(1, null)
-                    ModuleLog.maps(
-                        "MAPS-KBD-006",
-                        "car touch steered to keyboard (${param.thisObject?.javaClass?.simpleName})",
-                        always = true
-                    )
-                }
-            }
-        }
-        var hooked = 0
-        for (shortName in listOf("biue", "biui")) {
-            runCatching {
-                val clazz = findMapsClass(ctx.classLoader, shortName)
-                HookChains.findAndHookMethod(xposed, clazz, "c", intercept, MotionEvent::class.java)
-                log("Hooked $shortName.c car touch intercept (${clazz.name})")
-                hooked++
-            }.onFailure { log("Failed to hook $shortName.c touch intercept: ${it.message}") }
-        }
-        if (hooked == 0) {
-            log("No biug car touch hook installed — overlay taps may pass through")
-        }
-        hookGhostActivityTouchFallback(ctx)
-    }
-
-    private fun hookGhostActivityTouchFallback(ctx: HookContext) {
-        runCatching {
-            val ghost = Reflect.findClass(
-                "com.google.android.apps.auto.client.activity.ghost.GhostActivity",
-                ctx.classLoader
+    private fun findSearchEditText(activity: Activity): View? {
+        val resId = runCatching {
+            activity.resources.getIdentifier(
+                "destination_input_keyboard_search_edit_text",
+                "id",
+                activity.packageName
             )
-            HookChains.findAndHookMethod(xposed, ghost, "dispatchTouchEvent", object : MethodHook() {
-                override fun beforeHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    if (!ProjectedKeyboardOverlay.isVisible()) return
-                    val motionEvent = param.args[0] as? MotionEvent ?: return
-                    if (ProjectedKeyboardOverlay.dispatchCarTouch(motionEvent)) {
-                        param.result = true
-                    }
-                }
-            }, MotionEvent::class.java)
-            log("Hooked GhostActivity.dispatchTouchEvent fallback")
-        }.onFailure { log("Failed to hook GhostActivity touch fallback: ${it.message}") }
+        }.getOrNull()?.takeIf { it != 0 } ?: 0x7f0b02d0
+        val root = activity.window?.decorView ?: return null
+        return findViewByIdRecursive(root, resId)
     }
 
-    private fun hookProjectedKeyboard(ctx: HookContext) {
-        val rekShowHook = object : MethodHook() {
-            override fun beforeHookedMethod(param: HookParam) {
-                if (!ModulePrefs.isEnabled()) return
-                lastRel = WeakReference(param.thisObject)
-                debugEntry("${param.thisObject?.javaClass?.simpleName}.d() show keyboard overlay")
-            }
-
-            override fun afterHookedMethod(param: HookParam) {
-                if (!ModulePrefs.isEnabled()) return
-                val rel = param.thisObject ?: return
-                scheduleShowCarIme(rel)
+    private fun findViewByIdRecursive(root: View, id: Int): View? {
+        if (root.id == id) return root
+        if (root is ViewGroup) {
+            for (i in 0 until root.childCount) {
+                findViewByIdRecursive(root.getChildAt(i), id)?.let { return it }
             }
         }
+        return null
+    }
 
+    private fun scanForRekMatchingEditText(obj: Any, editText: View, depth: Int, maxDepth: Int): Any? {
+        if (depth > maxDepth) return null
+        if (isRekLike(obj) && rekOwnsEditText(obj, editText)) return obj
+        cacheRekFromQhf(obj)?.let { rek ->
+            if (rekOwnsEditText(rek, editText)) return rek
+        }
         runCatching {
-            val rek = findMapsClass(ctx.classLoader, "rek")
-            var hooked = 0
+            val fieldB = Reflect.getObjectField(obj, "b")
+            if (fieldB != null && isRekLike(fieldB) && rekOwnsEditText(fieldB, editText)) return fieldB
+        }
+        if (obj is View) return null
+        for (field in obj.javaClass.declaredFields) {
+            if (Modifier.isStatic(field.modifiers) || field.type.isPrimitive) continue
+            if (View::class.java.isAssignableFrom(field.type)) continue
             runCatching {
-                val rel = findMapsClass(ctx.classLoader, "rel")
-                HookChains.hookAllMethods(xposed, rel, "d", rekShowHook)
-                log("Hooked rel.d (${rel.name})")
-                hooked++
-            }.onFailure { debug("rel.d hook failed: ${it.message}") }
-            if (hooked == 0) {
-                hooked = hookRekImplementorsByDex(ctx, rek, rekShowHook)
-            }
-            if (hooked == 0) {
-                hooked = hookKeyboardOverlayBySignature(ctx, rekShowHook)
-            }
-            if (hooked == 0) {
-                log("rek.d overlay hook not found")
-            }
-        }.onFailure { log("Failed to hook rek overlay: ${it.message}") }
-
-        runCatching {
-            val snp = findMapsClass(ctx.classLoader, "snp")
-            HookChains.hookAllMethods(xposed, snp, "k", object : MethodHook() {
-                override fun beforeHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    lastSnp = WeakReference(param.thisObject)
-                    ModuleLog.maps("MAPS-003", "snp.k() show car IME", always = true)
-                }
-            })
-            HookChains.hookAllMethods(xposed, snp, "j", object : MethodHook() {
-                override fun beforeHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    lastSnp = WeakReference(param.thisObject)
-                    ModuleLog.maps("MAPS-003", "snp.j() bind car input", always = true)
-                }
-            })
-            log("Hooked snp.j/k (${snp.name})")
-        }.onFailure { log("Failed to hook snp: ${it.message}") }
-    }
-
-    private fun hookRekImplementorsByDex(
-        ctx: HookContext,
-        rek: Class<*>,
-        hook: MethodHook
-    ): Int {
-        var hooked = 0
-        runCatching {
-            val dex = DexFile(ctx.sourcePath)
-            val entries = dex.entries()
-            while (entries.hasMoreElements()) {
-                val name = entries.nextElement()
-                if (!name.startsWith("defpackage.")) continue
-                runCatching {
-                    val clazz = ctx.classLoader.loadClass(name)
-                    if (clazz.isInterface || !rek.isAssignableFrom(clazz)) return@runCatching
-                    HookChains.hookAllMethods(xposed, clazz, "d", hook)
-                    log("Hooked rek.d on ${clazz.name} (dex scan)")
-                    hooked++
-                }
-            }
-        }.onFailure { debug("rek dex scan failed: ${it.message}") }
-        return hooked
-    }
-
-    /** rel-like overlay: void d() plus void e(String, cbwl, ccxd) even when rek interface moved. */
-    private fun hookKeyboardOverlayBySignature(
-        ctx: HookContext,
-        hook: MethodHook
-    ): Int {
-        var hooked = 0
-        runCatching {
-            val dex = DexFile(ctx.sourcePath)
-            val entries = dex.entries()
-            while (entries.hasMoreElements()) {
-                val name = entries.nextElement()
-                if (!name.startsWith("defpackage.")) continue
-                runCatching {
-                    val clazz = ctx.classLoader.loadClass(name)
-                    if (clazz.isInterface) return@runCatching
-                    val methods = clazz.declaredMethods
-                    val hasShow = methods.any {
-                        it.name == "d" && it.parameterTypes.isEmpty() && it.returnType == Void.TYPE
-                    }
-                    val hasSubmit = methods.any {
-                        it.name == "e" && it.parameterTypes.size == 3 &&
-                            it.parameterTypes[0] == String::class.java
-                    }
-                    if (!hasShow || !hasSubmit) return@runCatching
-                    HookChains.hookAllMethods(xposed, clazz, "d", hook)
-                    log("Hooked keyboard overlay ${clazz.name} (signature scan)")
-                    hooked++
-                }
-            }
-        }.onFailure { debug("keyboard overlay signature scan failed: ${it.message}") }
-        return hooked
-    }
-
-    /** trt.i() feeds keyboard/driving restriction into header view model. */
-    private fun hookTrtDrivingFlags(ctx: HookContext) {
-        val hook = object : MethodHook() {
-            override fun afterHookedMethod(param: HookParam) {
-                if (!ModulePrefs.isEnabled()) return
-                if (param.result == true) {
-                    debug("trt.i() forced false in ${param.thisObject?.javaClass?.simpleName}")
-                    param.result = false
-                }
+                field.isAccessible = true
+                val value = field.get(obj) ?: return@runCatching
+                scanForRekMatchingEditText(value, editText, depth + 1, maxDepth)?.let { return it }
             }
         }
-        for (name in listOf("trp", "tro", "trn", "trq", "trk")) {
+        return null
+    }
+
+    private fun rekOwnsEditText(rek: Any, editText: View): Boolean {
+        return runCatching { Reflect.callMethod(rek, "f") == editText }.getOrDefault(false)
+    }
+
+    private fun discoverQhfHeader(root: Any): Any? = scanForQhf(root, depth = 0, maxDepth = 7)
+
+    private fun scanForQhf(obj: Any, depth: Int, maxDepth: Int): Any? {
+        if (depth > maxDepth) return null
+        if (isQhfHeader(obj)) return obj
+        if (obj is View) return null
+        for (field in obj.javaClass.declaredFields) {
+            if (Modifier.isStatic(field.modifiers) || field.type.isPrimitive) continue
+            if (View::class.java.isAssignableFrom(field.type)) continue
             runCatching {
-                val clazz = findMapsClass(ctx.classLoader, name)
-                HookChains.findAndHookMethod(xposed, clazz, "i", hook)
-                log("Hooked $name.i (${clazz.name})")
-            }.onFailure { debug("Skip $name.i: ${it.message}") }
+                field.isAccessible = true
+                val value = field.get(obj) ?: return@runCatching
+                scanForQhf(value, depth + 1, maxDepth)?.let { return it }
+            }
+        }
+        return null
+    }
+
+    private fun isQhfHeader(obj: Any): Boolean {
+        if (MapsSignatureDiscovery.isDiscoveredHeaderClass(obj.javaClass, targets)) return true
+        return MapsSignatureDiscovery.findRekFieldOnHeader(obj) != null
+    }
+
+    /**
+     * When qhf.l hook fails to install, invoke stock search tap reflectively.
+     * With driving flags spoofed, qhf.l() should call rek.d() internally.
+     */
+    private fun tryStockSearchTapPath(bindOnly: Boolean): Boolean {
+        val header = discoverSearchHeaderFromActivities() ?: return false
+        val tap = targets.searchHeaderTaps.firstOrNull { it.headerClass == header.javaClass }
+            ?: targets.searchHeaderTaps.firstOrNull()
+        val tapName = tap?.tapMethod?.name ?: "l"
+        return runCatching {
+            ModuleLog.maps("MAPS-001", "reflective ${header.javaClass.simpleName}.$tapName() search tap", always = true)
+            Reflect.callMethod(header, tapName)
+            val rek = cacheRekFromHeader(header) ?: resolveRek()
+            if (rek == null) return false
+            if (!bindOnly) {
+                scheduleShowCarIme(rek)
+            }
+            true
+        }.getOrElse {
+            ModuleLog.maps("MAPS-004", "reflective search tap failed: ${it.message}", always = true)
+            false
         }
     }
 
-    private fun openProjectedKeyboard(rek: Any) {
-        if (ProjectedKeyboardOverlay.toggleIfVisible()) {
-            ModuleLog.maps("MAPS-KBD-002", "keyboard toggle — closed overlay", always = true)
-            return
+    private fun discoverSearchHeaderFromActivities(): Any? {
+        runCatching {
+            val atClass = Class.forName("android.app.ActivityThread")
+            val thread = Reflect.callStaticMethod(atClass, "currentActivityThread")
+            val activities = Reflect.getObjectField(thread, "mActivities") as? Map<*, *> ?: return null
+            for (record in activities.values) {
+                val activity = Reflect.getObjectField(record, "activity") ?: continue
+                discoverQhfHeader(activity)?.let { return it }
+            }
         }
-        if (ProjectedKeyboardOverlay.shouldSuppressNextOpen()) {
-            ModuleLog.maps(
-                "MAPS-KBD-002",
-                "rek.d suppressed after toggle-close",
-                always = true
-            )
-            return
+        return null
+    }
+
+    private fun scanForRek(obj: Any, depth: Int, maxDepth: Int): Any? {
+        if (depth > maxDepth) return null
+        if (isRekLike(obj)) return obj
+        cacheRekFromHeader(obj)?.let { return it }
+        if (obj is View) return null
+        for (field in obj.javaClass.declaredFields) {
+            if (Modifier.isStatic(field.modifiers) || field.type.isPrimitive) continue
+            if (View::class.java.isAssignableFrom(field.type)) continue
+            runCatching {
+                field.isAccessible = true
+                val value = field.get(obj) ?: return@runCatching
+                if (isRekLike(value)) return value
+                scanForRek(value, depth + 1, maxDepth)?.let { return it }
+            }
         }
-        lastRel = WeakReference(rek)
+        return null
+    }
+
+    private fun cacheRekFromHeader(header: Any): Any? {
+        val pair = MapsSignatureDiscovery.findRekFieldOnHeader(header) ?: return null
+        val rek = pair.second
+        if (!isRekLike(rek)) return null
+        lastRek = WeakReference(rek)
+        return rek
+    }
+
+    private fun cacheRekFromQhf(header: Any): Any? = cacheRekFromHeader(header)
+
+    private fun isRekLikeType(type: Class<*>): Boolean =
+        MapsSignatureDiscovery.isRekOverlayType(type) || MapsInstallProbe.isRekLikeType(type)
+
+    private fun isRekLike(obj: Any): Boolean = isRekLikeType(obj.javaClass)
+
+    /** Stock Maps car IME: rel.d() bind, then reh.b() show. */
+    private fun openNativeKeyboard(rek: Any) {
+        lastRek = WeakReference(rek)
         runCatching {
             Reflect.callMethod(rek, "d")
+            ModuleLog.maps("MAPS-002", "rek.d() native keyboard bind", always = true)
         }.onFailure {
-            log("rek.d() failed: ${it.message}")
+            ModuleLog.maps("MAPS-004", "rek.d() failed: ${it.message}", always = true)
             return
         }
+        invokeSnpBindIfPresent()
         scheduleShowCarIme(rek)
     }
 
-    private fun openFromLastRel(): Boolean {
-        val rel = lastRel?.get() ?: return false
-        openProjectedKeyboard(rel)
-        return true
-    }
-
-    /** Submit query from custom overlay — rek.e / snp.b / geo intent fallback. */
-    private fun submitSearchQuery(query: String) {
-        if (query.isBlank()) return
-        val rek = discoverRekOverlay() ?: lastRel?.get()
-        if (rek != null) {
-            runCatching {
-                Reflect.callMethod(rek, "e", query, null, null)
-                ModuleLog.maps("MAPS-KBD-001", "submitted via rek.e", always = true)
-                return
-            }.onFailure {
-                ModuleLog.maps("MAPS-KBD-004", "rek.e failed: ${it.message}", always = true)
-            }
-        }
-        lastSnp?.get()?.let { snp ->
-            runCatching {
-                val classLoader = mapsClassLoader ?: throw IllegalStateException("no classloader")
-                val szf = runCatching { findMapsClass(classLoader, "szf") }.getOrNull()
-                val szfValue = szf?.enumConstants?.firstOrNull()
-                Reflect.callMethod(
-                    snp,
-                    "b",
-                    query,
-                    "",
-                    null,
-                    null,
-                    null,
-                    null,
-                    null,
-                    null,
-                    szfValue,
-                    null,
-                    false
-                )
-                ModuleLog.maps("MAPS-KBD-001", "submitted via snp.b", always = true)
-                return
-            }.onFailure {
-                ModuleLog.maps("MAPS-KBD-004", "snp.b failed: ${it.message}", always = true)
-            }
-        }
-        prepareMapsIme()
-        val rekRetry = discoverRekOverlay() ?: lastRel?.get()
-        if (rekRetry != null) {
-            runCatching {
-                Reflect.callMethod(rekRetry, "e", query, null, null)
-                ModuleLog.maps("MAPS-KBD-001", "submitted via rek.e after PREPARE", always = true)
-                return
-            }.onFailure {
-                ModuleLog.maps("MAPS-KBD-004", "rek.e retry failed: ${it.message}", always = true)
-            }
-        }
-        submitViaGeoIntent(query)
-    }
-
-    private fun submitViaGeoIntent(query: String) {
-        runCatching {
-            val app = Class.forName("android.app.ActivityThread")
-                .getMethod("currentApplication")
-                .invoke(null) as android.app.Application
-            val uri = android.net.Uri.parse("geo:0,0?q=${android.net.Uri.encode(query)}")
-            val intent = Intent(Intent.ACTION_VIEW, uri).apply {
-                setPackage("com.google.android.apps.maps")
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            app.startActivity(intent)
-            ModuleLog.maps("MAPS-KBD-001", "submitted via geo intent fallback", always = true)
-        }.onFailure {
-            ModuleLog.maps("MAPS-KBD-004", "geo intent submit failed: ${it.message}", always = true)
-        }
-    }
-
-    /** rel.d() binds car input (snp.j); reh.b() shows projection IME (snp.k). */
-    private fun scheduleShowCarIme(rel: Any) {
+    private fun scheduleShowCarIme(rek: Any) {
         val showIme = Runnable {
+            if (invokeSnpShowIfPresent()) return@Runnable
             runCatching {
-                val reh = findRehController(rel)
-                    ?: throw IllegalStateException("no reh on ${rel.javaClass.name}")
+                val reh = findRehController(rek)
+                    ?: throw IllegalStateException("no reh on ${rek.javaClass.name}")
                 Reflect.callMethod(reh, "b")
-                ModuleLog.maps("MAPS-003", "reh.b() requested car IME", always = true)
-            }.onFailure { log("reh.b() failed: ${it.message}") }
+                ModuleLog.maps("MAPS-003", "reh.b() native car IME show", always = true)
+            }.onFailure {
+                ModuleLog.maps("MAPS-004", "reh.b() failed: ${it.message}", always = true)
+            }
         }
-        val anchor = runCatching { Reflect.callMethod(rel, "f") as? View }.getOrNull()
+        val anchor = runCatching { Reflect.callMethod(rek, "f") as? View }.getOrNull()
             ?: runCatching {
-                val field = rel.javaClass.declaredFields.firstOrNull { it.type == View::class.java }
+                val field = rek.javaClass.declaredFields.firstOrNull { it.type == View::class.java }
                 field?.isAccessible = true
-                field?.get(rel) as? View
+                field?.get(rek) as? View
             }.getOrNull()
         if (anchor != null) {
             anchor.post(showIme)
@@ -1076,10 +1046,20 @@ object MapsHooks {
         return null
     }
 
-    private fun blhxDone(ctx: HookContext): Any {
-        val blhx = findMapsClass(ctx.classLoader, "blhx")
-        return Reflect.getStaticObjectField(blhx, "a")
-            ?: throw IllegalStateException("blhx.a is null")
+    private fun blhxDone(classLoader: ClassLoader, returnType: Class<*>? = null): Any? {
+        blhxSingleton?.let { return it }
+        runCatching {
+            val blhx = findMapsClass(classLoader, "blhx")
+            val value = Reflect.getStaticObjectField(blhx, "a")
+            if (value != null) {
+                blhxSingleton = value
+                return value
+            }
+        }
+        if (returnType != null && returnType != Void.TYPE && returnType != Void::class.java) {
+            return null
+        }
+        return null
     }
 
     private fun findMapsClass(classLoader: ClassLoader, shortName: String): Class<*> {
@@ -1092,11 +1072,15 @@ object MapsHooks {
     }
 
     private fun debugEntry(message: String) {
-        if (ModulePrefs.isDebug()) log(">> $message")
+        if (ModulePrefs.isDebug()) {
+            ModuleLog.maps("DEBUG", message)
+        }
     }
 
     private fun debug(message: String) {
-        if (ModulePrefs.isDebug()) log(message)
+        if (ModulePrefs.isDebug()) {
+            ModuleLog.maps("HOOK", message)
+        }
     }
 
     private fun log(message: String) {

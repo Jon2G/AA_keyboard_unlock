@@ -12,10 +12,13 @@ See also: [KEYBOARD_DEBUG_POSTMORTEM.md](KEYBOARD_DEBUG_POSTMORTEM.md) (hook-pat
 
 ## Current state (as of 2026-06-17)
 
+**Design goal:** [DESIGN_GOALS.md](DESIGN_GOALS.md) — hook driving detection; label rewrite is fallback only.
+
 | Layer | Status |
 |-------|--------|
 | Search tap routing (`kcw.k(10)` → broadcasts) | **Works** — gearhead intercept fires, Maps receives `PREPARE` / `OPEN` |
-| Hint rewrite ("Type anytime") | **Works** |
+| Driving detection hooks (`kur.aJ`, `qha`, `trt.i()`, `csrh`) | **In progress** — voice-only label = detection hooks failed |
+| Label / hint rewrite | **Out of scope** — must not be implemented |
 | Mic vs search separation | **Improved** — `tur.s` / `MAPS_MIC_VOICE`; mic icon opens keyboard by design |
 | Stock projected IME (`xcu` / `xdb` / `rek` / `snp`) | **Fails** — no bind, no overlay discovery, `dispatchKeyEvent` not consumed |
 | Custom QWERTY overlay — **`Presentation` on `maps/tws`** | **Works** — keyboard visible on car head unit |
@@ -285,7 +288,6 @@ White background hid map; could not close keyboard.
 | `hooks/GearheadHooks.kt` | `kcw.k(10)`, broadcasts, Voice Plate hints + mic icon, navigation dismiss |
 | `hooks/MapsHooks.kt` | OPEN/CLOSE/SUBMIT receivers, `qhf`, overlay open/toggle, lifecycle dismiss |
 | `hooks/VoicePlateMicIcon.kt` | Replace/hide Voice Plate mic `CarIcon` / `fyt` / `fyh` |
-| `hooks/VoicePlateHints.kt` | "Type anytime" hint rewrite |
 | `overlay/ProjectedKeyboardOverlay.kt` | QWERTY UI; Presentation(tws); dismiss/toggle |
 | `KeyboardBridge.kt` | PREPARE / OPEN / CLOSE / SUBMIT / MAPS_MIC_VOICE actions |
 | `MapsSearchSubmit.kt` | Submit query into Maps |

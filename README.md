@@ -10,10 +10,12 @@ LSPosed module that unlocks the Android Auto on-screen keyboard while driving by
 | Scenario | How |
 |----------|-----|
 | External app text fields (WhatsApp reply, messaging, etc.) | Gearhead projection IME (`xcu` → `xdl`/`xdu`) |
-| Google Maps Car search bar | Maps `Resources` rewrite: voice-only res → search hint (`MAPS-HINT-001`) |
-| Car App SearchTemplate hints | Gearhead `jtg` / template keyboard gates |
+| Google Maps Car search bar | Maps driving-detection hooks (`kur.aJ`, `qha`, `trt.i()`, `rek`/`snp`) — native keyboard path |
+| Car App SearchTemplate hints | Gearhead `jtg` / sensor spoof — keyboard allowed at template build |
 
-**Google Maps** rewrites the Car search voice-only string to the normal search hint when the module is enabled (`2132018912` → `2132018832`). Install the **logging** APK or a **debug** build for `MAPS-DRIVE-*` traces.
+**Principle:** Hook **driving detection** only — label/hint rewrite is **out of scope** and must not be implemented. See [docs/DESIGN_GOALS.md](docs/DESIGN_GOALS.md).
+
+**Google Maps** on AA: if the bar still says “Voice only while driving”, driving-detection hooks failed (e.g. `kur hint resolver not found`). Fix detection hooks; do not patch the string. Use a **debug** build for `MAPS-DRIVE-*` traces.
 
 When the toggle is **off**, all hooks are no-ops — stock Android Auto behavior is unchanged.
 
@@ -66,13 +68,13 @@ The module hooks two scoped packages:
 - Zeros **speed** sensor readings (type 2)
 - Forces keyboard-enabled flags in `lht` (LocationManager)
 - Unlocks projection IME when lockout UI would show
-- Rewrites "Voice only while driving" hints in Car App templates
+- `jtg` / template gates — keyboard allowed (not voice-only template init)
 
-**Google Maps** — search bar constraint bypass ([hook targets](docs/maps_hook_targets.md)):
+**Google Maps** — driving detection bypass + native keyboard ([targets](docs/maps_hook_targets.md), [design goals](docs/DESIGN_GOALS.md)):
 
-- Rewrites voice-only hint text to keyboard hint
-- Clears `isKeyboardRestricted` / `isMicRestricted` flags on search UI state
-- Routes search bar tap to projected keyboard instead of voice-only no-op
+- Spoofs `kur.aJ` driving args, `qha`/`qwt` restriction flags, `trt.i()`, `csrh` car parameters
+- Routes search tap to `rek.d()` / `snp.k` (stock projected IME)
+- Does **not** rewrite search bar hint text (out of scope)
 
 ```
 Phone (gearhead)                    Phone (maps)
@@ -100,7 +102,8 @@ Full failure history and architecture: [docs/LEARNINGS_AND_FAILURES.md](docs/LEA
 | Tap search while keyboard open | `MAPS-KBD-002 keyboard toggle` | — |
 | Change AA layout | `CLOSE_MAPS_KEYBOARD` + overlay hidden | — |
 | Tap header mic (voice) | `MAPS-MIC-001` + dictation UI | `kxe.F(10) blocked` on mic tap |
-| Hint text | `MAPS-HINT-001` / `GH-HINT-001` | "Voice only while driving" |
+| Hint text (stock) | Normal search hint from spoofed `kur.aJ` | "Voice only while driving" (detection hooks failed) |
+| Hint rewrite hooks | — | `MAPS-HINT-001` / `GH-HINT-001` (out of scope; must not exist) |
 
 ## Testing with DHU
 

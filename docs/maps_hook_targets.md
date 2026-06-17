@@ -2,7 +2,7 @@
 
 Reverse-engineered from `com.google.android.apps.maps` base APK pulled from test device on 2026-06-14.
 
-**Current focus (2026-06-17):** instrumentation-only in the Maps process to trace **in-process driving detection** that selects the search bar label. Custom keyboard overlay, label rewrites, and gearhead Maps keyboard intercepts were removed.
+**Design principle:** [DESIGN_GOALS.md](DESIGN_GOALS.md) — hook **driving detection** only. **Label/hint rewrite is out of scope and must not be implemented.**
 
 ## LSPosed scope
 
@@ -35,20 +35,22 @@ Maps native Car UI picks the search bar label in `kur.aJ()` (when present on bui
 
 `qha` UiState and `qhf` routing carry distraction flags on some builds. On the tested 2026-06 build, `qha`/`qwt` constructors have **no boolean restriction args**; `kur` static resolvers and `trp`–`trk` `i()` methods are **missing** — trace hooks log what exists instead of patching.
 
-## Confirmed hook targets (Maps process — trace only)
+## Confirmed hook targets (Maps process)
 
-| Priority | Class | Method | Action when module enabled + **Debug** |
-|----------|-------|--------|----------------------------------------|
-| **1** | `kur` | `aJ(...)` (if found) | **afterHook**: log hint text (`MAPS-DRIVE-001` / `009`) |
-| **1b** | `qha` | constructors | **afterHook**: log ctor args (`005`), dump fields (`007`) |
-| **1c** | `qwt` | constructors | **afterHook**: log ctor args (`005`), dump fields (`007`) |
-| **1d** | `qhf` | `l` / `k` / `i` | **afterHook**: log invocation (`006`) |
-| **2** | `trp`, `tro`, `trn`, `trq`, `trk` | `i()` (if present) | **afterHook**: log when returns `true` (`004`) |
-| **3** | `Resources` | `getText` / `getString` | **afterHook**: log voice/search res ids (`008`) |
-| **4** | `CarText` / `gbh` | create / IPC | **afterHook**: log outgoing hint (`020`) |
-| **5** | Install | dex probe | **once**: kur-like classes, driving strings (`010`, `011`) |
+Patch driving/restriction at the source. Log IDs in parentheses are for debug builds.
 
-No patching, broadcasts, overlay, or `rek`/`aoeb` keyboard routing in MapsHooks.
+| Priority | Class | Method | Action when module enabled |
+|----------|-------|--------|----------------------------|
+| **1** | `kur` | `aJ(Context,…)` | **beforeHook**: force `driving=false`, clear restriction bools; **afterHook**: rewrite voice-only result only if still leaked |
+| **1b** | `qha` | constructors | **beforeHook**: `isMicRestricted`/`isKeyboardRestricted` false; fix `hintString` if ctor still gets voice-only |
+| **1c** | `qwt` | constructors | **beforeHook**: `isKeyboardRestricted` / `isConfigRestricted` false |
+| **1d** | `qhf` | `l` | **beforeHook**: `rek.d()` keyboard tap; block voice path |
+| **2** | `trt` / `trp`…`trk` | `i()` | **afterHook**: force `false` (keyboard not restricted) |
+| **2b** | `azob` | `getCarParameters()` | **afterHook**: `csrh.A=true`, `csrh.c=false` (keyboard branch in `qhf.l`) |
+| **3** | `rel` / `snp` | `d`, `j`, `k` | Cache + `PREPARE`/`OPEN` native IME bind/show |
+| **4** | `aoeb` / `tur` | `l`, `s` | Block voice bypass; prefer `rek.d()` |
+
+**Out of scope (do not add):** `Resources.getString` / `CarText` / `VoicePlateHints` hint substitution, `MAPS-HINT-*` / `GH-HINT-*` layers. Wrong label → fix rows 1–4, not the string.
 
 ## Related strings (maps `res/values/strings.xml`)
 
@@ -84,8 +86,8 @@ Triage: `./scripts/triage_log.sh your.log` — section **Maps driving instrument
 
 | Layer | Package | What it controls |
 |-------|---------|------------------|
-| Maps driving label | `com.google.android.apps.maps` | `qha`, `Resources`, `kur` (build-dependent) — **trace only** |
-| External app IME | `com.google.android.projection.gearhead` | Sensor spoof + `xdl`/`gxy` keyboard gates |
-| Global voice assistant | `com.google.android.projection.gearhead` | Left enabled (no `hookVoicePlateAndAssistant`) |
+| Maps driving + keyboard | `com.google.android.apps.maps` | `kur.aJ`, `qha`, `trt.i()`, `qhf.l`, `rek`/`snp` — **hook detection, not label-only** |
+| External app IME | `com.google.android.projection.gearhead` | Sensor spoof + `xdl`/`gxy`/`jtg` keyboard gates |
+| Global voice assistant | `com.google.android.projection.gearhead` | Left enabled (no full voice-assistant kill) |
 
-Maps search keyboard on AA is **not** modified by this pivot; use gearhead stock path when parked (`xcu.h`, `xdb.onStart`).
+Maps search keyboard requires **both** scoped packages. See [DESIGN_GOALS.md](DESIGN_GOALS.md).

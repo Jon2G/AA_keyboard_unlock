@@ -174,7 +174,14 @@ object HookChains {
                 throw throwable
             }
             if (beforeParam.resultWasSet) {
-                return@intercept beforeParam.result
+                val afterParam = HookParam(chain, HookParam.Phase.AFTER)
+                afterParam.result = beforeParam.result
+                runCatching {
+                    hook.afterHookedMethod(afterParam)
+                }.onFailure { throwable ->
+                    throw throwable
+                }
+                return@intercept if (afterParam.resultWasSet) afterParam.result else beforeParam.result
             }
 
             val result = runCatching {

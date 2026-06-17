@@ -1,0 +1,26 @@
+---
+description: AA Keyboard Unlock — hook driving detection; label rewrite is OUT OF SCOPE
+globs: AA_keyboard_unlock/**
+alwaysApply: false
+---
+
+# Hook driving detection — label rewrite is forbidden
+
+## Goal
+
+Unlock the **native** Maps projected keyboard (`rek.d` / `reh.b` / `snp.j`+`k`) by **spoofing driving and keyboard-restriction detection** in Maps and gearhead.
+
+## Out of scope — do not implement
+
+**Search bar hint / label rewrite must not be added, restored, or used as fallback.**
+
+Forbidden:
+
+- `Resources.getString` / `getText` hint substitution
+- `VoicePlateHints`, `CarText` / placeholder rewriting
+- Rewriting `qha.hintString` or `kur.aJ` return values in afterHook
+- `MAPS-HINT-001`, `GH-HINT-001`, or similar string-patch layers
+
+“Voice only while driving” means **driving hooks failed** — fix `kur.aJ`, `qha`, `trt.i()`, `qwt`, `csrh`, `qhf.l`. Do not hide the label.
+
+Read [docs/DESIGN_GOALS.md](../docs/DESIGN_GOALS.md).

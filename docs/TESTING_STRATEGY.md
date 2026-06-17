@@ -98,7 +98,7 @@ adb logcat -d | grep -E 'AAKeyboardUnlock|LSPosed-Bridge.*AAKeyboard' > logs/log
 |---------|---------|
 | `GH-MAPS-001` / `kcw.k(10)` intercept | Removed Maps keyboard path |
 | `GH-KBD-001` / `MAPS-KBD-003` | Removed custom overlay |
-| `MAPS-HINT-001` / `GH-HINT-001` | Removed label rewrites |
+| `MAPS-HINT-001` / `GH-HINT-001` | Label rewrite — **out of scope; must not be present in builds** |
 
 ---
 
