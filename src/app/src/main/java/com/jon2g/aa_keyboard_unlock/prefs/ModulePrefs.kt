@@ -11,6 +11,7 @@ object ModulePrefs {
 
     const val KEY_ENABLED = "enabled"
     const val KEY_DEBUG = "debug"
+    const val KEY_MAPS_MIC_UNTIL = "maps_mic_until"
 
     const val DEFAULT_ENABLED = true
     const val DEFAULT_DEBUG = false

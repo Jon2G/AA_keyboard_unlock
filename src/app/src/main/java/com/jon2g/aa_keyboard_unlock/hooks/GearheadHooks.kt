@@ -1,5 +1,22 @@
 package com.jon2g.aa_keyboard_unlock.hooks
 
+import android.app.Activity
+import android.app.Application
+import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.res.Configuration
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.text.InputType
+import android.view.View
+import android.view.inputmethod.BaseInputConnection
+import android.view.inputmethod.EditorInfo
+import com.jon2g.aa_keyboard_unlock.KeyboardBridge
+import com.jon2g.aa_keyboard_unlock.MicSignal
 import com.jon2g.aa_keyboard_unlock.ModuleLog
 import com.jon2g.aa_keyboard_unlock.prefs.ModulePrefs
 import de.robv.android.xposed.XC_MethodHook
@@ -21,12 +38,25 @@ object GearheadHooks {
     private const val VOICE_SESSION_TYPE_START_TRANSCRIPTION = 6
     private const val VOICE_SEARCH_TRIGGER_MAPS = 10
 
-    // Block raw voice / transcription session types; allow type 6 (demand-space keyboard UI).
+    // Block raw voice / transcription session types for Maps search tap window.
     private val VOICE_BLOCK_SESSION_TYPES = setOf(
         VOICE_SESSION_TYPE_VOICE,
         VOICE_SESSION_TYPE_DIRECT_REPLY,
-        VOICE_SESSION_TYPE_TRANSCRIPTION
+        VOICE_SESSION_TYPE_TRANSCRIPTION,
+        VOICE_SESSION_TYPE_START_TRANSCRIPTION
     )
+
+    /** After blocking kcw.k(10), reject assistant voice/transcription sessions briefly. */
+    @Volatile
+    private var mapsSearchBlockUntilMs = 0L
+
+    /** Mic icon uses hgy.c/jxa — allow through even during search-voice blocks. */
+    @Volatile
+    private var micDictationActive = false
+
+    /** Maps header mic (gmm_mic IPC) — allow kxe.F(10) briefly. */
+    @Volatile
+    private var mapsMicFromMapsHeaderUntilMs = 0L
 
     // lha enum: a=CAR_MOVING, b=CAR_PARKED, c=UNKNOWN
     private const val LHA_FIELD_CAR_PARKED = "b"
@@ -60,6 +90,7 @@ object GearheadHooks {
                     if (installedForProcess) return
                     installedForProcess = true
                     installHooks(lpparam)
+                    registerGearheadBridgeReceiver(param.thisObject as Application)
                 }
             }
         )
@@ -232,6 +263,7 @@ object GearheadHooks {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     lastSearchGxy = WeakReference(param.thisObject)
+                    ModuleLog.gearhead("GH-MAPS-000", "cached gxy SearchTemplate", always = true)
                 }
             })
             val gyb = findGearheadClass(lpparam.classLoader, "gyb")
@@ -387,14 +419,20 @@ object GearheadHooks {
     }
 
     /**
-     * Maps AA search tap → kcw.k(trigger=10) → kxe.G(10) voice session.
-     * Block voice/transcription and open the projected QWERTY IME (xcu/xdl), not kxe.O(jxa) dictation.
+     * Maps AA search tap → DemandClientService → kcw.k(trigger=10) → voice / transcription.
+     * Block gearhead demand-space voice; Maps process opens projected IME via rek.d (MapsHooks).
      */
     private fun hookMapsSearchKeyboard(lpparam: XC_LoadPackage.LoadPackageParam) {
         hookVoicePlateWidget(lpparam)
         hookHintStringRewrites(lpparam)
+        hookComposeMicDrawableSwap(lpparam)
         hookProjectedImeCache(lpparam)
         hookMapsVoiceSessionBlock(lpparam)
+        hookMapsDemandSpaceVoiceBlock(lpparam)
+        hookMapsDemandSpaceScrimBlock(lpparam)
+        hookCarAppMicDictation(lpparam)
+        hookDemandClientMicBypass(lpparam)
+        hookDismissKeyboardOnAaLayoutChange(lpparam)
 
         runCatching {
             val kvl = findGearheadClass(lpparam.classLoader, "kvl")
@@ -409,15 +447,277 @@ object GearheadHooks {
                         if (!ModulePrefs.isEnabled()) return
                         val trigger = param.args[1] as Int
                         if (trigger != VOICE_SEARCH_TRIGGER_MAPS) return
-                        debugEntry("kcw.k() trigger=$trigger")
+                        val gearCtx = resolveGearheadContext(lpparam.classLoader)
+                        if (gearCtx != null && MicSignal.isMapsMicActive(gearCtx)) {
+                            mapsMicFromMapsHeaderUntilMs = System.currentTimeMillis() + 4000L
+                            debugEntry("kcw.k() trigger=$trigger — mic passthrough (MicSignal)")
+                            return
+                        }
+                        if (inMapsMicFromHeader()) {
+                            debugEntry("kcw.k() trigger=$trigger — mic passthrough (skip keyboard)")
+                            return
+                        }
+                        debugEntry("kcw.k() trigger=$trigger — keyboard path (skip demand open)")
+                        markMapsSearchVoiceBlock()
+                        closeMapsVoiceDemand(lpparam.classLoader)
+                        requestPrepareMapsKeyboardBroadcast(lpparam.classLoader)
                         param.result = null
-                        ModuleLog.gearhead("GH-MAPS-001", "kcw.k($trigger) blocked voice — opening projected IME", always = true)
-                        openProjectedImeKeyboard()
+                    }
+
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        val trigger = param.args[1] as Int
+                        if (trigger != VOICE_SEARCH_TRIGGER_MAPS) return
+                        if (inMapsMicFromHeader()) return
+                        if (param.hasThrowable()) return
+                        val classLoader = lpparam.classLoader
+                        runOnMainThread {
+                            Handler(Looper.getMainLooper()).postDelayed({
+                                if (inMapsMicFromHeader() || micDictationActive) {
+                                    ModuleLog.gearhead("GH-MIC-001", "skip keyboard — mic session active", always = true)
+                                    return@postDelayed
+                                }
+                                ModuleLog.gearhead(
+                                    "GH-MAPS-001",
+                                    "kcw.k($trigger) after demand blocked — opening keyboard",
+                                    always = true
+                                )
+                                openMapsSearchKeyboardInGearhead(classLoader)
+                            }, 300L)
+                        }
                     }
                 }
             )
-            log("Hooked kcw.k Maps intercept (${kcw.name})")
+            log("Hooked kcw.k Maps surgical intercept (${kcw.name})")
         }.onFailure { log("Failed to hook kcw.k Maps intercept: ${it.message}") }
+    }
+
+    /** Close Maps overlay when AA layout changes or Maps leaves the Voice Plate template. */
+    private fun hookDismissKeyboardOnAaLayoutChange(lpparam: XC_LoadPackage.LoadPackageParam) {
+        runCatching {
+            XposedHelpers.findAndHookMethod(
+                Activity::class.java,
+                "onConfigurationChanged",
+                Configuration::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        requestCloseMapsKeyboardBroadcast(lpparam.classLoader)
+                    }
+                }
+            )
+            log("Hooked Activity.onConfigurationChanged keyboard dismiss")
+        }.onFailure { log("Failed to hook onConfigurationChanged dismiss: ${it.message}") }
+
+        runCatching {
+            val voicePlateWidget = XposedHelpers.findClass(
+                "com.android.car.libraries.apphost.external.model.widgets.VoicePlateWidget",
+                lpparam.classLoader
+            )
+            val jpf = findGearheadClass(lpparam.classLoader, "jpf")
+            val componentName = android.content.ComponentName::class.java
+            val sessionInfo = XposedHelpers.findClass("androidx.car.app.SessionInfo", lpparam.classLoader)
+            val templateWrapper = XposedHelpers.findClass("androidx.car.app.model.TemplateWrapper", lpparam.classLoader)
+            XposedHelpers.findAndHookMethod(
+                jpf,
+                "a",
+                componentName,
+                sessionInfo,
+                templateWrapper,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        val component = param.args[0] as? android.content.ComponentName ?: return
+                        if (component.packageName != "com.google.android.apps.maps") return
+                        val wrapper = param.args[2] ?: return
+                        val template = runCatching {
+                            XposedHelpers.callMethod(wrapper, "getTemplate")
+                        }.getOrNull() ?: return
+                        if (voicePlateWidget.isInstance(template)) return
+                        requestCloseMapsKeyboardBroadcast(lpparam.classLoader)
+                    }
+                }
+            )
+            log("Hooked jpf.a Maps template navigation dismiss (${jpf.name})")
+        }.onFailure { log("Failed to hook jpf.a navigation dismiss: ${it.message}") }
+    }
+
+    private fun requestCloseMapsKeyboardBroadcast(classLoader: ClassLoader): Boolean {
+        return sendMapsKeyboardBroadcast(
+            classLoader,
+            KeyboardBridge.ACTION_CLOSE_MAPS_KEYBOARD,
+            "CLOSE_MAPS_KEYBOARD"
+        )
+    }
+
+    /** Block gray demand-space scrim (qib.p) on Maps search tap; mic paths still open demand space. */
+    private fun hookMapsDemandSpaceScrimBlock(lpparam: XC_LoadPackage.LoadPackageParam) {
+        runCatching {
+            val qib = findGearheadClass(lpparam.classLoader, "qib")
+            XposedHelpers.findAndHookMethod(qib, "p", object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (!ModulePrefs.isEnabled()) return
+                    if (micDictationActive || inMapsMicFromHeader()) return
+                    if (!inMapsSearchVoiceBlock()) return
+                    ModuleLog.gearhead(
+                        "GH-MAPS-003",
+                        "qib.p() blocked — Maps search keyboard (no dictation scrim)",
+                        always = true
+                    )
+                    param.result = null
+                }
+            })
+            log("Hooked qib.p demand scrim block (${qib.name})")
+        }.onFailure { log("Failed to hook qib.p scrim block: ${it.message}") }
+    }
+
+    /** Voice Plate / SearchTemplate compose hardcodes gs_mic_vd_theme_24 via daf.A — swap at load time. */
+    private fun hookComposeMicDrawableSwap(lpparam: XC_LoadPackage.LoadPackageParam) {
+        runCatching {
+            val daf = findGearheadClass(lpparam.classLoader, "daf")
+            val buq = findGearheadClass(lpparam.classLoader, "buq")
+            val keyboardId = VoicePlateMicIcon.RES_KEYBOARD_BLACK
+            XposedHelpers.findAndHookMethod(
+                daf,
+                "A",
+                Int::class.javaPrimitiveType!!,
+                buq,
+                Int::class.javaPrimitiveType!!,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        val resId = param.args[0] as Int
+                        if (resId != VoicePlateMicIcon.RES_MIC_THEME) return
+                        param.args[0] = keyboardId
+                        ModuleLog.gearhead(
+                            "GH-ICON-001",
+                            "compose mic drawable -> keyboard (daf.A 0x${keyboardId.toString(16)})",
+                            always = true
+                        )
+                    }
+                }
+            )
+            log("Hooked daf.A compose mic icon swap (${daf.name})")
+        }.onFailure { log("Failed to hook daf.A mic swap: ${it.message}") }
+    }
+
+    private fun hookMapsDemandSpaceVoiceBlock(lpparam: XC_LoadPackage.LoadPackageParam) {
+        runCatching {
+            val qib = findGearheadClass(lpparam.classLoader, "qib")
+            XposedHelpers.findAndHookMethod(qib, "l", Int::class.javaPrimitiveType!!, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (!ModulePrefs.isEnabled()) return
+                    if (param.args[0] as Int != VOICE_SEARCH_TRIGGER_MAPS) return
+                    micDictationActive = true
+                    runCatching {
+                        val atClass = Class.forName("android.app.ActivityThread")
+                        val app = XposedHelpers.callStaticMethod(atClass, "currentApplication") as? Context
+                        if (app != null) MicSignal.signalMapsMicVoice(app)
+                    }
+                    ModuleLog.gearhead("GH-MIC-001", "qib.l(10) mic transcription allowed", always = true)
+                }
+
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    micDictationActive = false
+                }
+            })
+            log("Hooked qib.l mic passthrough (${qib.name})")
+        }.onFailure { log("Failed to hook qib.l mic passthrough: ${it.message}") }
+    }
+
+    /** gmm_transcription_request bundle → qib.l (mic), not kcw.k (search). */
+    private fun hookDemandClientMicBypass(lpparam: XC_LoadPackage.LoadPackageParam) {
+        runCatching {
+            val demandService = XposedHelpers.findClass(
+                "com.google.android.gearhead.demand.DemandClientService",
+                lpparam.classLoader
+            )
+            XposedHelpers.findAndHookMethod(
+                demandService,
+                "b",
+                android.os.Bundle::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        val bundle = param.args[0] as? android.os.Bundle ?: return
+                        signalMapsMicFromDemandBundle(lpparam.classLoader, bundle, param.thisObject as? Context)
+                    }
+                }
+            )
+            log("Hooked DemandClientService.b mic detection")
+        }.onFailure { log("Failed to hook DemandClientService.b: ${it.message}") }
+    }
+
+    private fun signalMapsMicFromDemandBundle(classLoader: ClassLoader, bundle: android.os.Bundle, context: Context?) {
+        val transcription = bundle.getBoolean("gmm_transcription_request")
+        val hardwareMic = bundle.getInt("open_cause") == 3 && bundle.getInt("open_cause_key_code") == 84
+        if (!transcription && !hardwareMic) return
+        micDictationActive = true
+        mapsMicFromMapsHeaderUntilMs = System.currentTimeMillis() + 4000L
+        val ctx = context ?: resolveGearheadContext(classLoader)
+        if (ctx != null) MicSignal.signalMapsMicVoice(ctx.applicationContext)
+        ModuleLog.gearhead(
+            "GH-MIC-001",
+            "demand mic bundle (transcription=$transcription hardware=$hardwareMic)",
+            always = true
+        )
+    }
+
+    private fun registerGearheadBridgeReceiver(app: Application) {
+        runCatching {
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(context: Context, intent: Intent) {
+                    if (!ModulePrefs.isEnabled()) return
+                    if (intent.action != KeyboardBridge.ACTION_MAPS_MIC_VOICE) return
+                    mapsMicFromMapsHeaderUntilMs = System.currentTimeMillis() + 4000L
+                    ModuleLog.gearhead("GH-MIC-002", "MAPS_MIC_VOICE received — allow kxe.F(10)", always = true)
+                }
+            }
+            val filter = IntentFilter(KeyboardBridge.ACTION_MAPS_MIC_VOICE)
+            if (Build.VERSION.SDK_INT >= 33) {
+                app.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+            } else {
+                app.registerReceiver(receiver, filter)
+            }
+            log("Registered MAPS_MIC_VOICE broadcast receiver")
+        }.onFailure { log("Failed to register gearhead bridge receiver: ${it.message}") }
+    }
+
+    private fun inMapsMicFromHeader(): Boolean {
+        if (System.currentTimeMillis() < mapsMicFromMapsHeaderUntilMs) return true
+        val ctx = runCatching {
+            val atClass = Class.forName("android.app.ActivityThread")
+            XposedHelpers.callStaticMethod(atClass, "currentApplication") as? Context
+        }.getOrNull()
+        return ctx != null && MicSignal.isMapsMicActive(ctx)
+    }
+
+    /**
+     * Mic icon on SearchTemplate: gan.onTriggerTranscription → hgy.c(kkl) → jxa dictation.
+     * Search bar uses kcw.k(10) instead — leave mic path untouched.
+     */
+    private fun hookCarAppMicDictation(lpparam: XC_LoadPackage.LoadPackageParam) {
+        runCatching {
+            val jwz = findGearheadClass(lpparam.classLoader, "jwz")
+            val kkl = findGearheadClass(lpparam.classLoader, "kkl")
+            XposedHelpers.findAndHookMethod(jwz, "c", kkl, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (!ModulePrefs.isEnabled()) return
+                    micDictationActive = true
+                    runCatching {
+                        val atClass = Class.forName("android.app.ActivityThread")
+                        val app = XposedHelpers.callStaticMethod(atClass, "currentApplication") as? Context
+                        if (app != null) MicSignal.signalMapsMicVoice(app)
+                    }
+                    ModuleLog.gearhead("GH-MIC-001", "hgy.c(kkl) mic dictation allowed", always = true)
+                }
+
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    micDictationActive = false
+                }
+            })
+            log("Hooked jwz.c mic dictation passthrough (${jwz.name})")
+        }.onFailure { log("Failed to hook jwz.c mic passthrough: ${it.message}") }
     }
 
     private fun hookProjectedImeCache(lpparam: XC_LoadPackage.LoadPackageParam) {
@@ -432,7 +732,11 @@ object GearheadHooks {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     activeImeService = WeakReference(param.thisObject)
-                    debug("cached active IME service (${param.thisObject.javaClass.simpleName})")
+                    ModuleLog.gearhead(
+                        "GH-MAPS-000",
+                        "cached active IME service (${param.thisObject.javaClass.simpleName})",
+                        always = true
+                    )
                 }
             })
             log("Hooked xcu.c IME cache (${xcu.name})")
@@ -449,11 +753,36 @@ object GearheadHooks {
 
         runCatching {
             val kxe = findGearheadClass(lpparam.classLoader, "kxe")
-            XposedHelpers.findAndHookMethod(kxe, "G", Int::class.javaPrimitiveType!!, object : XC_MethodHook() {
+            XposedHelpers.findAndHookMethod(kxe, "F", Int::class.javaPrimitiveType!!, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     val trigger = param.args[0] as Int
                     if (trigger != VOICE_SEARCH_TRIGGER_MAPS) return
+                    if (micDictationActive || inMapsMicFromHeader()) {
+                        ModuleLog.gearhead("GH-MIC-001", "kxe.F($trigger) mic passthrough", always = true)
+                        return
+                    }
+                    if (!inMapsSearchVoiceBlock()) return
+                    ModuleLog.gearhead(
+                        "GH-MAPS-001",
+                        "kxe.F($trigger) blocked — Maps search keyboard",
+                        always = true
+                    )
+                    param.result = null
+                }
+            })
+            log("Hooked kxe.F Maps voice block (${kxe.name})")
+        }.onFailure { log("Failed to hook kxe.F Maps voice block: ${it.message}") }
+
+        runCatching {
+            val kxe = findGearheadClass(lpparam.classLoader, "kxe")
+            val bundle = android.os.Bundle::class.java
+            XposedHelpers.findAndHookMethod(kxe, "G", Int::class.javaPrimitiveType!!, bundle, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (!ModulePrefs.isEnabled()) return
+                    val trigger = param.args[0] as Int
+                    if (trigger != VOICE_SEARCH_TRIGGER_MAPS) return
+                    if (micDictationActive || inMapsMicFromHeader()) return
                     ModuleLog.gearhead("GH-MAPS-001", "kxe.G($trigger) blocked Maps voice session", always = true)
                     param.result = null
                 }
@@ -467,29 +796,20 @@ object GearheadHooks {
             XposedHelpers.findAndHookMethod(kxe, "O", qjr, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!ModulePrefs.isEnabled()) return
+                    if (!inMapsSearchVoiceBlock()) return
+                    if (micDictationActive) return
                     val callback = param.args[0] ?: return
-                    if (callback.javaClass.simpleName != "jxa") return
-                    ModuleLog.gearhead("GH-MAPS-001", "kxe.O(jxa) blocked — transcription is voice dictation", always = true)
-                    param.result = null
-                }
-
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    if (param.throwable != null) return
-                    val callback = param.args[0]?.javaClass?.simpleName ?: "null"
-                    val started = runCatching {
-                        val state = XposedHelpers.getObjectField(param.thisObject, "e")
-                        XposedHelpers.getBooleanField(state, "b")
-                    }.getOrNull()
+                    if (!isJxaTranscriptionCallback(callback)) return
                     ModuleLog.gearhead(
-                        "GH-MAPS-002",
-                        "kxe.O callback=$callback controllerStarted=$started",
+                        "GH-MAPS-001",
+                        "kxe.O(jxa) blocked during Maps search (no dictation)",
                         always = true
                     )
+                    param.result = null
                 }
             })
-            log("Hooked kxe.O block/diagnostic (${kxe.name})")
-        }.onFailure { log("Failed to hook kxe.O: ${it.message}") }
+            log("Hooked kxe.O Maps transcription block (${kxe.name})")
+        }.onFailure { log("Failed to hook kxe.O Maps block: ${it.message}") }
 
         runCatching {
             val kxe = findGearheadClass(lpparam.classLoader, "kxe")
@@ -504,7 +824,16 @@ object GearheadHooks {
                     val sessionType = XposedHelpers.getIntField(config, "a")
                     val trigger = XposedHelpers.getIntField(config, "f")
                     debugEntry("kxe.ac() type=$sessionType trigger=$trigger")
-                    if (trigger == VOICE_SEARCH_TRIGGER_MAPS && sessionType in mapsVoiceTypes) {
+                    val mapsTapBlock = inMapsSearchVoiceBlock()
+                    if (micDictationActive || inMapsMicFromHeader()) return
+                    if (mapsTapBlock && sessionType in mapsVoiceTypes) {
+                        ModuleLog.gearhead(
+                            "GH-MAPS-001",
+                            "kxe.ac blocked Maps voice/transcription type=$sessionType trigger=$trigger",
+                            always = true
+                        )
+                        param.result = null
+                    } else if (trigger == VOICE_SEARCH_TRIGGER_MAPS && sessionType in mapsVoiceTypes) {
                         ModuleLog.gearhead(
                             "GH-MAPS-001",
                             "kxe.ac blocked Maps voice/transcription type=$sessionType trigger=$trigger",
@@ -534,24 +863,353 @@ object GearheadHooks {
         }.onFailure { log("Failed to hook kxe.ac Maps voice block: ${it.message}") }
     }
 
-    /** Show gearhead projected QWERTY (xdl/xdu), not demand-space transcription (jxa). */
-    private fun openProjectedImeKeyboard() {
-        if (openProjectedImeViaXcu()) return
-        if (openProjectedImeViaXdb()) return
-        ModuleLog.gearhead("GH-MAPS-004", "projected IME unavailable — no active xcu/xdb", always = true)
+    private fun markMapsSearchVoiceBlock() {
+        mapsSearchBlockUntilMs = System.currentTimeMillis() + 5000L
     }
 
-    private fun openProjectedImeViaXcu(): Boolean {
+    private fun inMapsSearchVoiceBlock(): Boolean {
+        return System.currentTimeMillis() < mapsSearchBlockUntilMs
+    }
+
+    private fun runOnMainThread(block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            block()
+            return
+        }
+        Handler(Looper.getMainLooper()).post(block)
+    }
+
+    /** Maps search tap: stock IME attempts, then custom overlay when keyboard is not verified on car display. */
+    private fun openMapsSearchKeyboardInGearhead(classLoader: ClassLoader) {
+        val stockVerified = openProjectedImeKeyboard(classLoader)
+        if (!stockVerified) {
+            openKxeQwertyDirect(classLoader)
+            lastSearchGxy?.get()?.let { gxy ->
+                val hgy = XposedHelpers.getObjectField(gxy, "d")
+                if (hgy != null) openCarAppQwertyKeyboard(hgy, classLoader)
+            } ?: ModuleLog.gearhead("GH-MAPS-004", "no cached gxy in this gearhead process", always = true)
+            sendMapsKeyboardBroadcast(classLoader, KeyboardBridge.ACTION_OPEN_MAPS_KEYBOARD, "OPEN_MAPS_KEYBOARD")
+        }
+        if (stockVerified) {
+            ModuleLog.gearhead("GH-KBD-002", "stock projected keyboard verified — skip overlay", always = true)
+            return
+        }
+        closeMapsVoiceDemand(classLoader)
+        ModuleLog.gearhead(
+            "GH-KBD-001",
+            "keyboard overlay delegated to Maps (gearhead cannot draw on GhostActivityDisplay)",
+            always = true
+        )
+    }
+
+    /** Dismiss assistant demand-space voice UI before showing the typing overlay. */
+    private fun closeMapsVoiceDemand(classLoader: ClassLoader) {
+        runCatching {
+            val kcw = findGearheadClass(classLoader, "kcw")
+            val controller = XposedHelpers.callStaticMethod(kcw, "l")
+            val ywj = findGearheadClass(classLoader, "ywj")
+            val interrupted = XposedHelpers.getStaticObjectField(ywj, "INTERRUPTED")
+            XposedHelpers.callMethod(controller, "n", interrupted)
+            ModuleLog.gearhead("GH-MAPS-003", "closed demand-space voice for keyboard overlay", always = true)
+        }.onFailure {
+            ModuleLog.gearhead("GH-MAPS-004", "close demand voice failed: ${it.message}", always = true)
+        }
+    }
+
+    private fun resolveGearheadContext(classLoader: ClassLoader): Context? {
         return runCatching {
-            ModuleLog.gearhead("GH-MAPS-002", "attempt projected IME xcu.h()", always = true)
-            val ime = activeImeService?.get()
-                ?: throw IllegalStateException("no cached xcu IME service")
-            XposedHelpers.setBooleanField(ime, "l", true)
-            XposedHelpers.callMethod(ime, "h")
-            ModuleLog.gearhead("GH-MAPS-003", "xcu.h() invoked", always = true)
+            val kcw = findGearheadClass(classLoader, "kcw")
+            val controller = XposedHelpers.callStaticMethod(kcw, "l")
+            XposedHelpers.getObjectField(controller, "d") as Context
+        }.getOrNull() ?: runCatching {
+            val atClass = Class.forName("android.app.ActivityThread")
+            val at = XposedHelpers.callStaticMethod(atClass, "currentActivityThread")
+            XposedHelpers.callStaticMethod(atClass, "currentApplication") as Context
+        }.getOrNull()
+    }
+
+    /** kcw.l().O(qjo) — QWERTY in the gearhead process handling the tap (no gxy cache needed). */
+    private fun openKxeQwertyDirect(classLoader: ClassLoader): Boolean {
+        return runCatching {
+            val kcw = findGearheadClass(classLoader, "kcw")
+            val kxe = XposedHelpers.callStaticMethod(kcw, "l")
+            val view = findGearheadInputView(kxe) ?: throw IllegalStateException("no gearhead input view")
+            val editorInfo = EditorInfo().apply {
+                packageName = "com.google.android.apps.maps"
+                inputType = InputType.TYPE_CLASS_TEXT
+            }
+            val connection = view.onCreateInputConnection(editorInfo)
+                ?: BaseInputConnection(view, true)
+            val qjoClass = findGearheadClass(classLoader, "qjo")
+            val callback = XposedHelpers.newInstance(qjoClass, connection, Runnable {})
+            markMapsSearchVoiceBlock()
+            ModuleLog.gearhead("GH-MAPS-002", "attempt kxe.O(qjo) direct QWERTY", always = true)
+            XposedHelpers.callMethod(kxe, "O", callback)
+            ModuleLog.gearhead("GH-MAPS-003", "kxe.O(qjo) invoked", always = true)
             true
         }.getOrElse {
-            ModuleLog.gearhead("GH-MAPS-004", "xcu.h failed: ${it.javaClass.simpleName}: ${it.message}", always = true)
+            ModuleLog.gearhead(
+                "GH-MAPS-004",
+                "kxe.O(qjo) failed: ${it.javaClass.simpleName}: ${it.message}",
+                always = true
+            )
+            false
+        }
+    }
+
+    private fun findGearheadInputView(kxe: Any): View? {
+        runCatching {
+            val context = XposedHelpers.getObjectField(kxe, "d") as? Context
+            (context as? Activity)?.window?.decorView?.let { return it }
+        }
+        runCatching {
+            val atClass = Class.forName("android.app.ActivityThread")
+            val at = XposedHelpers.callStaticMethod(atClass, "currentActivityThread")
+            val activities = XposedHelpers.getObjectField(at, "mActivities") as? Map<*, *> ?: return null
+            for (record in activities.values) {
+                val activity = XposedHelpers.getObjectField(record, "activity") as? Activity ?: continue
+                activity.window?.decorView?.let { return it }
+            }
+        }
+        return null
+    }
+
+    private fun isJxaTranscriptionCallback(callback: Any): Boolean {
+        val name = callback.javaClass.name
+        return name.endsWith(".jxa") || name.contains("jxa")
+    }
+
+    /** hgy.a(InputConnection) → kxe.O(qjo) — real QWERTY, not jxa dictation. */
+    private fun openCarAppQwertyKeyboard(hgy: Any, classLoader: ClassLoader): Boolean {
+        if (XposedHelpers.callMethod(hgy, "b") != true) {
+            ModuleLog.gearhead("GH-MAPS-004", "hgy.b() false — Car App keyboard gated", always = true)
+            return false
+        }
+        val hostView = findCarAppHostView(lastSearchGxy?.get()) ?: run {
+            ModuleLog.gearhead("GH-MAPS-004", "no Car App host view for InputConnection", always = true)
+            return false
+        }
+        return runCatching {
+            val editorInfo = EditorInfo().apply {
+                packageName = "com.google.android.apps.maps"
+                inputType = InputType.TYPE_CLASS_TEXT
+            }
+            val connection = hostView.onCreateInputConnection(editorInfo)
+                ?: BaseInputConnection(hostView, true)
+            val refresh = Runnable {
+                runCatching {
+                    lastSearchGxy?.get()?.let { gxy ->
+                        XposedHelpers.callMethod(gxy, "f")
+                    }
+                }
+            }
+            markMapsSearchVoiceBlock()
+            ModuleLog.gearhead("GH-MAPS-002", "attempt hgy.a(qjo) Car App QWERTY", always = true)
+            XposedHelpers.callMethod(hgy, "a", connection, refresh)
+            ModuleLog.gearhead("GH-MAPS-003", "hgy.a(qjo) invoked", always = true)
+            true
+        }.getOrElse {
+            ModuleLog.gearhead(
+                "GH-MAPS-004",
+                "hgy.a(qjo) failed: ${it.javaClass.simpleName}: ${it.message}",
+                always = true
+            )
+            false
+        }
+    }
+
+    private fun findCarAppHostView(gxy: Any?): View? {
+        if (gxy == null) return null
+        val gdi = XposedHelpers.getObjectField(gxy, "b") ?: return null
+        runCatching {
+            val ctx = XposedHelpers.callMethod(gdi, "a") as? Context
+            val activity = ctx as? Activity
+            val decor = activity?.window?.decorView
+            if (decor != null) return decor
+        }
+        runCatching {
+            val base = gdi as? Context
+            val activity = base as? Activity
+            val decor = activity?.window?.decorView
+            if (decor != null) return decor
+        }
+        return null
+    }
+
+    private fun requestPrepareMapsKeyboardBroadcast(classLoader: ClassLoader): Boolean {
+        return sendMapsKeyboardBroadcast(classLoader, KeyboardBridge.ACTION_PREPARE_MAPS_IME, "PREPARE_MAPS_IME")
+    }
+
+    private fun requestMapsKeyboardBroadcast(classLoader: ClassLoader): Boolean {
+        return sendMapsKeyboardBroadcast(classLoader, KeyboardBridge.ACTION_OPEN_MAPS_KEYBOARD, "OPEN_MAPS_KEYBOARD")
+    }
+
+    private fun sendMapsKeyboardBroadcast(classLoader: ClassLoader, action: String, label: String): Boolean {
+        return runCatching {
+            val kcw = findGearheadClass(classLoader, "kcw")
+            val controller = XposedHelpers.callStaticMethod(kcw, "l")
+            val context = XposedHelpers.getObjectField(controller, "d") as Context
+            val intent = Intent(action).setPackage("com.google.android.apps.maps")
+            context.sendBroadcast(intent)
+            ModuleLog.gearhead("GH-MAPS-002", "broadcast $label to Maps", always = true)
+            true
+        }.getOrElse {
+            ModuleLog.gearhead("GH-MAPS-004", "Maps broadcast $label failed: ${it.message}", always = true)
+            false
+        }
+    }
+
+    private fun openProjectedImeKeyboard(classLoader: ClassLoader): Boolean {
+        val ime = activeImeService?.get() ?: findRunningXcuService(classLoader)
+        if (ime != null) {
+            activeImeService = WeakReference(ime)
+        }
+        val xdbShown = when {
+            activeInputFragment?.get() != null -> openProjectedImeViaXdb()
+            else -> tryOpenProjectionFragmentFromIme(classLoader, ime)
+        }
+        val phoneKeyboard = if (ime != null) openProjectedImeViaXcu(classLoader, ime) else false
+        if (xdbShown || phoneKeyboard) return true
+        if (ime != null || activeInputFragment?.get() != null) {
+            ModuleLog.gearhead("GH-MAPS-004", "projected IME present but did not open", always = true)
+        } else {
+            ModuleLog.gearhead("GH-MAPS-004", "projected IME unavailable — no active xcu/xdb (bind snp.j first)", always = true)
+        }
+        return false
+    }
+
+    /** Multi-PID trap: xcu may be running without a cache hit in this process. */
+    private fun findRunningXcuService(classLoader: ClassLoader): Any? {
+        return runCatching {
+            val xcuClass = findGearheadClass(classLoader, "xcu")
+            val atClass = Class.forName("android.app.ActivityThread")
+            val at = XposedHelpers.callStaticMethod(atClass, "currentActivityThread")
+            val services = XposedHelpers.getObjectField(at, "mServices") as? Map<*, *> ?: return null
+            for (record in services.values) {
+                val service = XposedHelpers.getObjectField(record, "service") ?: continue
+                if (xcuClass.isInstance(service)) {
+                    ModuleLog.gearhead(
+                        "GH-MAPS-000",
+                        "discovered running xcu service via ActivityThread scan",
+                        always = true
+                    )
+                    return service
+                }
+            }
+            null
+        }.getOrNull()
+    }
+
+    private fun openProjectedImeViaXcu(classLoader: ClassLoader, ime: Any? = null): Boolean {
+        val resolved = ime ?: activeImeService?.get() ?: return false
+        return runCatching {
+            ModuleLog.gearhead("GH-MAPS-002", "attempt projected IME xcu.h()", always = true)
+            prepareXcuForExternalKeyboard(resolved)
+            XposedHelpers.callMethod(resolved, "h")
+            if (isProjectedKeyboardStarted(resolved)) {
+                ModuleLog.gearhead("GH-MAPS-003", "xcu.h() started PhoneKeyboardActivity", always = true)
+                true
+            } else {
+                // Do not force-start PhoneKeyboardActivity — it flashes on the phone display and
+                // never verifies on the car virtual display; Maps GhostActivity overlay handles typing.
+                ModuleLog.gearhead(
+                    "GH-MAPS-004",
+                    "xcu.h() did not verify keyboard — skip PhoneKeyboardActivity (Maps overlay next)",
+                    always = true
+                )
+                false
+            }
+        }.getOrElse {
+            ModuleLog.gearhead(
+                "GH-MAPS-004",
+                "xcu.h failed: ${it.javaClass.simpleName}: ${it.message} — skip PhoneKeyboardActivity",
+                always = true
+            )
+            false
+        }
+    }
+
+    private fun isProjectedKeyboardStarted(ime: Any): Boolean {
+        return runCatching { XposedHelpers.getObjectField(ime, "q") != null }.getOrDefault(false)
+    }
+
+    private fun tryOpenProjectionFragmentFromIme(classLoader: ClassLoader, ime: Any?): Boolean {
+        val resolved = ime ?: return false
+        val xdm = findGearheadClass(classLoader, "xdm")
+        if (!xdm.isInstance(resolved)) return false
+        return runCatching {
+            val fragment = XposedHelpers.callMethod(resolved, "e") ?: return false
+            activeInputFragment = WeakReference(fragment)
+            openProjectedImeViaXdb()
+        }.getOrDefault(false)
+    }
+
+    private fun prepareXcuForExternalKeyboard(ime: Any) {
+        runCatching {
+            val alreadyRunning = XposedHelpers.getObjectField(ime, "q")
+            if (XposedHelpers.getBooleanField(ime, "k") && alreadyRunning == null) {
+                XposedHelpers.setBooleanField(ime, "k", false)
+            }
+            XposedHelpers.setBooleanField(ime, "l", true)
+            val editorInfo = XposedHelpers.getObjectField(ime, "h") as? EditorInfo
+                ?: EditorInfo().apply {
+                    packageName = "com.google.android.apps.maps"
+                    inputType = InputType.TYPE_CLASS_TEXT
+                    hintText = "Search"
+                }
+            if (XposedHelpers.getObjectField(ime, "h") == null) {
+                XposedHelpers.setObjectField(ime, "h", editorInfo)
+            }
+            runCatching {
+                val xdb = XposedHelpers.callMethod(ime, "f")
+                if (xdb != null) {
+                    XposedHelpers.setBooleanField(xdb, "c", false)
+                }
+            }
+        }
+    }
+
+    /** Bypass xcu.h() gates when bind exists but stock h() returns early (Fermata / Voice Plate). */
+    private fun forceStartPhoneKeyboardActivity(ime: Any, classLoader: ClassLoader): Boolean {
+        return runCatching {
+            if (ime !is Service) return false
+            prepareXcuForExternalKeyboard(ime)
+            val editorInfo = XposedHelpers.getObjectField(ime, "h") as EditorInfo
+            val phoneKb = XposedHelpers.findClass(
+                "com.google.android.apps.auto.components.externalkeyboard.phone.PhoneKeyboardActivity",
+                classLoader
+            )
+            val clientId = XposedHelpers.getIntField(ime, "m") + 1
+            XposedHelpers.setIntField(ime, "m", clientId)
+            val intent = Intent(ime, phoneKb).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                putExtra("IMEClass", ime.javaClass.name)
+                putExtra("BinderClientId", clientId)
+                putExtra("ImeOptions", editorInfo.imeOptions)
+                putExtra("ImeHint", editorInfo.hintText?.toString() ?: "")
+            }
+            val lfe = findGearheadClass(classLoader, "lfe")
+            val launchOpts = XposedHelpers.callStaticMethod(lfe, "b") as android.os.Bundle
+            ime.startActivity(intent, launchOpts)
+            ModuleLog.gearhead("GH-MAPS-003", "force-started PhoneKeyboardActivity (car display)", always = true)
+            true
+        }.getOrElse {
+            ModuleLog.gearhead("GH-MAPS-004", "force PhoneKeyboardActivity failed: ${it.message}", always = true)
+            false
+        }
+    }
+
+    private fun openProjectedImeViaXdl(classLoader: ClassLoader): Boolean {
+        return runCatching {
+            val xdm = findGearheadClass(classLoader, "xdm")
+            val config = XposedHelpers.callMethod(xdm, "e")
+                ?: XposedHelpers.newInstance(findGearheadClass(classLoader, "xdl"))
+            XposedHelpers.setBooleanField(config, "c", false)
+            XposedHelpers.callMethod(config, "d")
+            ModuleLog.gearhead("GH-MAPS-003", "xdl/xdu.d() projection keyboard", always = true)
+            true
+        }.getOrElse {
+            ModuleLog.gearhead("GH-MAPS-004", "xdl.d failed: ${it.javaClass.simpleName}: ${it.message}", always = true)
             false
         }
     }
@@ -561,10 +1219,19 @@ object GearheadHooks {
             ModuleLog.gearhead("GH-MAPS-002", "attempt projected IME xdb.d() unlock", always = true)
             val fragment = activeInputFragment?.get()
                 ?: throw IllegalStateException("no cached xdb fragment")
-            XposedHelpers.setBooleanField(fragment, "c", false)
+            val wasLocked = XposedHelpers.getBooleanField(fragment, "c")
+            if (wasLocked) {
+                XposedHelpers.setBooleanField(fragment, "c", false)
+            }
             XposedHelpers.callMethod(fragment, "d")
-            ModuleLog.gearhead("GH-MAPS-003", "xdb.d() keyboard unlock invoked", always = true)
-            true
+            val unlocked = !XposedHelpers.getBooleanField(fragment, "c")
+            if (unlocked) {
+                ModuleLog.gearhead("GH-MAPS-003", "xdb.d() projection keyboard shown", always = true)
+                true
+            } else {
+                ModuleLog.gearhead("GH-MAPS-004", "xdb.d() did not unlock projection keyboard", always = true)
+                false
+            }
         }.getOrElse {
             ModuleLog.gearhead("GH-MAPS-004", "xdb.d failed: ${it.javaClass.simpleName}: ${it.message}", always = true)
             false
@@ -709,6 +1376,7 @@ object GearheadHooks {
                         if (!ModulePrefs.isEnabled()) return
                         debugEntry("VoicePlateWidget.<init>()")
                         rewritePlaceholderArg(param, 2, lpparam.classLoader, carText)
+                        rewriteVoicePlateMicIconArg(param, 1, lpparam.classLoader)
                     }
                 }
             )
@@ -721,7 +1389,21 @@ object GearheadHooks {
                     param.result = VoicePlateHints.createCarText(lpparam.classLoader)
                 }
             })
-            log("Hooked VoicePlateWidget constructor + getPlaceholderText")
+            XposedHelpers.findAndHookMethod(voicePlateWidget, "getIcon", object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    if (!ModulePrefs.isEnabled()) return
+                    val icon = param.result ?: return
+                    val replaced = VoicePlateMicIcon.replaceMicCarIcon(
+                        lpparam.classLoader,
+                        resolveGearheadContext(lpparam.classLoader),
+                        icon
+                    )
+                    if (replaced !== icon) {
+                        param.result = replaced
+                    }
+                }
+            })
+            log("Hooked VoicePlateWidget constructor + getPlaceholderText + getIcon")
         }.onFailure { log("Failed to hook VoicePlateWidget: ${it.message}") }
 
         runCatching {
@@ -733,6 +1415,7 @@ object GearheadHooks {
                     if (!ModulePrefs.isEnabled()) return
                     debugEntry("hjq.<init>()")
                     rewritePlaceholderArg(param, 2, lpparam.classLoader, carText)
+                    rewriteVoicePlateMicFytArg(param, 1, lpparam.classLoader)
                 }
             })
             log("Hooked hjq constructor (${hjq.name})")
@@ -777,11 +1460,51 @@ object GearheadHooks {
                                 always = true
                             )
                         }
+                        rewriteVoicePlateMicFyhArg(param, 2, lpparam.classLoader)
                     }
                 }
             )
             log("Hooked hjv constructor (${hjv.name})")
         }.onFailure { log("Failed to hook hjv: ${it.message}") }
+    }
+
+    private fun rewriteVoicePlateMicIconArg(
+        param: XC_MethodHook.MethodHookParam,
+        index: Int,
+        classLoader: ClassLoader
+    ) {
+        if (param.args[index] == null) return
+        param.args[index] = VoicePlateMicIcon.replaceMicCarIcon(
+            classLoader,
+            resolveGearheadContext(classLoader),
+            param.args[index]
+        )
+    }
+
+    private fun rewriteVoicePlateMicFytArg(
+        param: XC_MethodHook.MethodHookParam,
+        index: Int,
+        classLoader: ClassLoader
+    ) {
+        if (param.args[index] == null) return
+        param.args[index] = VoicePlateMicIcon.replaceMicFyt(
+            classLoader,
+            resolveGearheadContext(classLoader),
+            param.args[index]
+        )
+    }
+
+    private fun rewriteVoicePlateMicFyhArg(
+        param: XC_MethodHook.MethodHookParam,
+        index: Int,
+        classLoader: ClassLoader
+    ) {
+        if (param.args[index] == null) return
+        param.args[index] = VoicePlateMicIcon.replaceMicFyh(
+            classLoader,
+            resolveGearheadContext(classLoader),
+            param.args[index]
+        )
     }
 
     private fun rewritePlaceholderArg(

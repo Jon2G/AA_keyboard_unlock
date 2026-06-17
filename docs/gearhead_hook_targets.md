@@ -114,8 +114,38 @@ This bypasses Car App SearchTemplate hooks. IME unlock requires both `xdl.d` and
 | **10** | `gan` | constructor | **beforeHook**: `voiceOnlyEnabled = false`, `showKeyboardByDefault = true` |
 | **11** | `lgz` | `a(boolean)` | **beforeHook**: force keyboard-enabled notifications to `true` |
 | **12** | `jtg` | constructor | **afterHook**: force `jtg.g` state to `true`, dispatch refresh event 6 |
-| ~~**12–17**~~ | Voice Plate / assistant (`VoicePlateWidget`, `hjq`, `hjv`, `kxe`, `kwt`, …) | — | **Not installed** — `hookVoicePlateAndAssistant` disabled so the AA voice assistant works normally |
+| ~~**12–17**~~ | Voice Plate / assistant (`kxe`, `kwt`, full `hookVoicePlateAndAssistant`) | — | **Partial** — global assistant hooks stay disabled; **Maps search** hooks Voice Plate hints + mic icon + `hjv` transcription state |
+| **12a** | `VoicePlateWidget` | `<init>`, `getIcon`, `getPlaceholderText` | Rewrite placeholder; replace mic `CarIcon` with keyboard icon |
+| **12b** | `hjq` | constructor | Placeholder rewrite; replace `fyt` icon |
+| **12c** | `hjv` | constructor | Force transcriptionState INACTIVE (1); rewrite voice-only text; replace `fyh` icon |
+| **12d** | `jpf` | `a(ComponentName, SessionInfo, TemplateWrapper)` | When Maps template ≠ VoicePlateWidget → `CLOSE_MAPS_KEYBOARD` broadcast |
+| **12e** | `Activity` | `onConfigurationChanged` | Broadcast `CLOSE_MAPS_KEYBOARD` (AA layout change) |
+| **13** | `kcw` | `k(kvl, int)` | Maps search: surgical intercept, PREPARE/OPEN broadcasts, keyboard in `afterHookedMethod` |
 | **17c** | `xcu` | `h()` | Entry log for external keyboard start |
+
+### Voice Plate mic icon (`VoicePlateMicIcon`)
+
+The search bar trailing icon is a mic in stock AA but opens the keyboard when our `kcw.k(10)` intercept runs. `VoicePlateMicIcon` replaces it at three layers:
+
+| Layer | Class | Field | Drawable |
+|-------|-------|-------|----------|
+| Car App model | `VoicePlateWidget` | `CarIcon` (arg 1) | `CarIcon.createWithResource` → `ic_keyboard_black_24dp` |
+| Internal | `hjq` | `fyt` (arg 1) | `new fyh(drawable, null, null)` |
+| Compose UI | `hjv` | `fyh` (arg 2) | same |
+
+If no gearhead drawable resolves: icon slot set to `null` (hidden). Logs: `GH-ICON-001` (replaced), `GH-ICON-002` (hidden).
+
+**Not hooked:** `gig.bi` SearchTemplate mic (hardcoded `gs_mic_vd_theme_24`) — Maps AA search uses Voice Plate, not SearchTemplate.
+
+### Cross-process keyboard broadcasts (`KeyboardBridge`)
+
+| Action | Direction | Purpose |
+|--------|-----------|---------|
+| `PREPARE_MAPS_IME` | gearhead → Maps | `rel.d` / `snp.j` bind before stock IME |
+| `OPEN_MAPS_KEYBOARD` | gearhead → Maps | Open overlay / stock fallback |
+| `CLOSE_MAPS_KEYBOARD` | gearhead → Maps | Dismiss overlay on layout / template change |
+| `SUBMIT_MAPS_SEARCH` | overlay → Maps | Query from custom QWERTY |
+| `MAPS_MIC_VOICE` | Maps → gearhead | Allow real mic through `kcw.k(10)` window |
 
 ### Sensor callback multiplexer (`lhk`)
 

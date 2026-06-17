@@ -1,9 +1,28 @@
 package com.jon2g.aa_keyboard_unlock.hooks
 
+import android.app.Activity
+import android.app.Application
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.res.Configuration
+import android.content.ComponentCallbacks2
+import android.os.Build
+import android.view.Display
+import android.view.KeyEvent
+import android.view.MotionEvent
+import android.util.Pair
 import android.view.View
+import com.jon2g.aa_keyboard_unlock.KeyboardBridge
+import com.jon2g.aa_keyboard_unlock.MapsSearchSubmit
+import com.jon2g.aa_keyboard_unlock.MicSignal
 import com.jon2g.aa_keyboard_unlock.ModuleLog
+import com.jon2g.aa_keyboard_unlock.overlay.ProjectedKeyboardOverlay
 import com.jon2g.aa_keyboard_unlock.prefs.ModulePrefs
+import dalvik.system.DexFile
 import de.robv.android.xposed.XC_MethodHook
+import de.robv.android.xposed.XC_MethodReplacement
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
@@ -16,9 +35,24 @@ object MapsHooks {
     @Volatile
     private var kurAjHookLogged = false
 
-    /** Latest rel overlay instance — used when AA routes search through assistant gRPC (aoeb.l). */
+    /** Latest rek overlay (rel or dex-discovered implementor). */
     @Volatile
     private var lastRel: WeakReference<Any>? = null
+
+    /** Maps car host (tur/tvj/llj) for dispatchKeyEvent keyboard fallback. */
+    @Volatile
+    private var lastMapsCarHost: WeakReference<Any>? = null
+
+    @Volatile
+    private var lastSnp: WeakReference<Any>? = null
+
+    private val pendingGmmMic = ThreadLocal<Boolean>()
+
+    /** Set while qhf.k()/i() mic shortcuts run — allow pub.s / lka voice IPC. */
+    private val mapsMicVoiceActive = ThreadLocal<Boolean>()
+
+    @Volatile
+    private var mapsClassLoader: ClassLoader? = null
 
     fun install(lpparam: XC_LoadPackage.LoadPackageParam) {
         XposedHelpers.findAndHookMethod(
@@ -30,24 +64,157 @@ object MapsHooks {
                     if (installedForProcess) return
                     installedForProcess = true
                     installHooks(lpparam)
+                    registerMapsKeyboardReceiver(param.thisObject as Application)
+                    registerOverlayDismissOnNavigation(param.thisObject as Application)
                 }
             }
         )
     }
 
     private fun installHooks(lpparam: XC_LoadPackage.LoadPackageParam) {
+        mapsClassLoader = lpparam.classLoader
         ModuleLog.install(
             ModuleLog.Process.MAPS,
-            "enabled=${ModulePrefs.isEnabled()} debug=${ModulePrefs.isDebug()} pkg=${lpparam.packageName}"
+            "enabled=${ModulePrefs.isEnabled()} debug=${ModulePrefs.isDebug()} pkg=${lpparam.packageName} process=${lpparam.processName}"
         )
         hookSearchHintResolver(lpparam)
         hookHeaderUiState(lpparam)
         hookDistractionState(lpparam)
+        hookMapsCarHostCache(lpparam)
+        hookGmmMicBinder(lpparam)
+        hookPubVoiceSearch(lpparam)
         hookSearchBarTap(lpparam)
         hookProjectedKeyboard(lpparam)
+        hookMapsCarTouchIntercept(lpparam)
         hookMapsVoiceSession(lpparam)
         hookTrtDrivingFlags(lpparam)
-        ModuleLog.maps("MAPS-INSTALL", "hooks installed for ${lpparam.packageName}", always = true)
+        ModuleLog.maps("MAPS-INSTALL", "hooks installed for ${lpparam.processName}", always = true)
+    }
+
+    private fun registerMapsKeyboardReceiver(app: Application) {
+        runCatching {
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(context: Context, intent: Intent) {
+                    if (!ModulePrefs.isEnabled()) return
+                    when (intent.action) {
+                        KeyboardBridge.ACTION_PREPARE_MAPS_IME -> {
+                            ModuleLog.maps(
+                                "MAPS-001",
+                                "broadcast PREPARE_MAPS_IME — binding projected keyboard",
+                                always = true
+                            )
+                            prepareMapsIme()
+                        }
+                        KeyboardBridge.ACTION_OPEN_MAPS_KEYBOARD -> {
+                            ModuleLog.maps(
+                                "MAPS-001",
+                                "broadcast OPEN_MAPS_KEYBOARD — opening projected keyboard",
+                                always = true
+                            )
+                            openMapsKeyboard(lastMapsCarHost?.get())
+                        }
+                        KeyboardBridge.ACTION_CLOSE_MAPS_KEYBOARD -> {
+                            ModuleLog.maps(
+                                "MAPS-KBD-002",
+                                "broadcast CLOSE_MAPS_KEYBOARD — hiding overlay",
+                                always = true
+                            )
+                            ProjectedKeyboardOverlay.hideForNavigation()
+                        }
+                        KeyboardBridge.ACTION_SUBMIT_MAPS_SEARCH -> {
+                            val query = intent.getStringExtra(KeyboardBridge.EXTRA_QUERY)?.trim().orEmpty()
+                            if (query.isEmpty()) {
+                                ModuleLog.maps("MAPS-KBD-004", "submit ignored — empty query", always = true)
+                                return
+                            }
+                            ModuleLog.maps(
+                                "MAPS-001",
+                                "broadcast SUBMIT_MAPS_SEARCH — \"$query\"",
+                                always = true
+                            )
+                            submitSearchQuery(query)
+                        }
+                    }
+                }
+            }
+            val filter = IntentFilter().apply {
+                addAction(KeyboardBridge.ACTION_PREPARE_MAPS_IME)
+                addAction(KeyboardBridge.ACTION_OPEN_MAPS_KEYBOARD)
+                addAction(KeyboardBridge.ACTION_CLOSE_MAPS_KEYBOARD)
+                addAction(KeyboardBridge.ACTION_SUBMIT_MAPS_SEARCH)
+            }
+            if (Build.VERSION.SDK_INT >= 33) {
+                app.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+            } else {
+                app.registerReceiver(receiver, filter)
+            }
+            log("Registered PREPARE + OPEN + CLOSE + SUBMIT Maps keyboard receiver")
+        }.onFailure { log("Failed to register Maps keyboard receiver: ${it.message}") }
+    }
+
+    private fun registerOverlayDismissOnNavigation(app: Application) {
+        runCatching {
+            app.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
+                override fun onActivityCreated(activity: Activity, savedInstanceState: android.os.Bundle?) = Unit
+
+                override fun onActivityStarted(activity: Activity) = Unit
+
+                override fun onActivityResumed(activity: Activity) = Unit
+
+                override fun onActivityPaused(activity: Activity) = Unit
+
+                override fun onActivityStopped(activity: Activity) {
+                    if (!ModulePrefs.isEnabled()) return
+                    if (!isMapsCarUiHost(activity)) return
+                    if (!ProjectedKeyboardOverlay.isVisible()) return
+                    ModuleLog.maps(
+                        "MAPS-KBD-002",
+                        "hide overlay — ${activity.javaClass.simpleName} stopped",
+                        always = true
+                    )
+                    ProjectedKeyboardOverlay.hideForNavigation()
+                }
+
+                override fun onActivitySaveInstanceState(activity: Activity, outState: android.os.Bundle) = Unit
+
+                override fun onActivityDestroyed(activity: Activity) {
+                    if (!ModulePrefs.isEnabled()) return
+                    if (!isMapsCarUiHost(activity)) return
+                    if (!ProjectedKeyboardOverlay.isVisible()) return
+                    ProjectedKeyboardOverlay.hideForNavigation()
+                }
+            })
+            app.registerComponentCallbacks(object : ComponentCallbacks2 {
+                override fun onConfigurationChanged(newConfig: Configuration) {
+                    if (!ModulePrefs.isEnabled()) return
+                    if (!ProjectedKeyboardOverlay.isVisible()) return
+                    ModuleLog.maps(
+                        "MAPS-KBD-002",
+                        "hide overlay — application configuration changed",
+                        always = true
+                    )
+                    ProjectedKeyboardOverlay.hideForNavigation()
+                }
+
+                override fun onLowMemory() = Unit
+
+                override fun onTrimMemory(level: Int) = Unit
+            })
+            log("Registered overlay dismiss on navigation / layout change")
+        }.onFailure { log("Failed to register overlay dismiss lifecycle: ${it.message}") }
+    }
+
+    private fun isMapsCarUiHost(activity: Activity): Boolean {
+        val className = activity.javaClass.name
+        if (className.contains("GhostActivity") ||
+            className.contains("biph") ||
+            className.contains("CarApp") ||
+            className.contains("Projection")
+        ) {
+            return true
+        }
+        val displayId = activity.display?.displayId ?: Display.DEFAULT_DISPLAY
+        return displayId != Display.DEFAULT_DISPLAY
     }
 
     /**
@@ -176,28 +343,373 @@ object MapsHooks {
         }.onFailure { log("Failed to hook qwt: ${it.message}") }
     }
 
+    private fun hookMapsCarHostCache(lpparam: XC_LoadPackage.LoadPackageParam) {
+        val cacheHook = object : XC_MethodHook() {
+            override fun afterHookedMethod(param: MethodHookParam) {
+                if (!ModulePrefs.isEnabled()) return
+                lastMapsCarHost = WeakReference(param.thisObject)
+                ModuleLog.maps(
+                    "MAPS-000",
+                    "cached car host ${param.thisObject.javaClass.simpleName}",
+                    always = true
+                )
+            }
+        }
+        for (shortName in listOf("tur", "tvj", "llj", "biph")) {
+            runCatching {
+                val clazz = findMapsClass(lpparam.classLoader, shortName)
+                XposedBridge.hookAllMethods(clazz, "onResume", cacheHook)
+                XposedBridge.hookAllMethods(clazz, "onStart", cacheHook)
+                log("Hooked ${clazz.simpleName} onResume/onStart host cache")
+            }.onFailure { debug("Skip ${shortName} lifecycle: ${it.message}") }
+        }
+        runCatching {
+            val llj = findMapsClass(lpparam.classLoader, "llj")
+            XposedBridge.hookAllMethods(llj, "c", cacheHook)
+            log("Hooked llj.c onCreate host cache (${llj.name})")
+        }.onFailure { debug("Skip llj.c host cache: ${it.message}") }
+    }
+
     /**
-     * Search bar taps: l() = keyboard/voice router, k() = voice shortcut, i() = mic action.
-     * All redirect to projected keyboard (rek/rel → snp) instead of pub.s() voice dictation.
+     * Voice search IPC: Bundle gmm_mic=true → lka.z(1) → gearhead kcw.k(10).
+     * pub.s() is not always on the call stack; intercept the binder transaction.
+     */
+    private fun hookGmmMicBinder(lpparam: XC_LoadPackage.LoadPackageParam) {
+        val gmmMicPassthrough = object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                if (!ModulePrefs.isEnabled()) return
+                if (param.args[0] as Int != 1) return
+                if (mapsMicVoiceActive.get() != true) {
+                    pendingGmmMic.remove()
+                    return
+                }
+                pendingGmmMic.remove()
+                mapsMicVoiceActive.remove()
+                ModuleLog.maps("MAPS-MIC-001", "lka.${param.method.name}(1) gmm_mic — voice passthrough", always = true)
+                notifyGearheadMapsMicVoice()
+            }
+        }
+
+        runCatching {
+            XposedBridge.hookAllMethods(android.os.Bundle::class.java, "putBoolean", object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    if (!ModulePrefs.isEnabled()) return
+                    if (param.args[0] == "gmm_mic" && param.args[1] == true) {
+                        pendingGmmMic.set(true)
+                    }
+                }
+            })
+            log("Hooked Bundle.putBoolean gmm_mic tracker")
+        }.onFailure { log("Failed to hook Bundle.putBoolean: ${it.message}") }
+
+        runCatching {
+            val lkc = findMapsClass(lpparam.classLoader, "lkc")
+            XposedBridge.hookAllMethods(lkc, "f", object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (!ModulePrefs.isEnabled()) return
+                    if (param.args.size < 2) return
+                    val bundle = param.args[1] as? android.os.Bundle ?: return
+                    if (bundle.getBoolean("gmm_mic")) {
+                        pendingGmmMic.set(true)
+                        ModuleLog.maps("MAPS-000", "lkc.f gmm_mic bundle detected", always = true)
+                    }
+                }
+            })
+            log("Hooked lkc.f gmm_mic tracker (${lkc.name})")
+        }.onFailure { log("Failed to hook lkc.f: ${it.message}") }
+
+        runCatching {
+            val lka = findMapsClass(lpparam.classLoader, "lka")
+            XposedBridge.hookAllMethods(lka, "z", gmmMicPassthrough)
+            XposedBridge.hookAllMethods(lka, "A", gmmMicPassthrough)
+            log("Hooked lka.z/A gmm_mic mic passthrough (${lka.name})")
+        }.onFailure { log("Failed to hook lka.z/A: ${it.message}") }
+    }
+
+    /**
+     * pub.s() on tur/tvj is the Maps header mic — always passthrough; notify gearhead before gmm_mic IPC.
+     */
+    private fun hookPubVoiceSearch(lpparam: XC_LoadPackage.LoadPackageParam) {
+        val micPassthroughHook = object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                if (!ModulePrefs.isEnabled()) return
+                mapsMicVoiceActive.set(true)
+                pendingGmmMic.remove()
+                notifyGearheadMapsMicVoice()
+                ModuleLog.maps(
+                    "MAPS-MIC-001",
+                    "${param.thisObject.javaClass.simpleName}.s() mic voice allowed",
+                    always = true
+                )
+            }
+
+            override fun afterHookedMethod(param: MethodHookParam) {
+                mapsMicVoiceActive.remove()
+            }
+        }
+
+        var hooked = 0
+        runCatching {
+            val pub = findMapsClass(lpparam.classLoader, "pub")
+            for (shortName in listOf("tur", "tvj", "rzb", "rzc")) {
+                runCatching {
+                    val clazz = findMapsClass(lpparam.classLoader, shortName)
+                    if (!pub.isAssignableFrom(clazz)) return@runCatching
+                    XposedBridge.hookAllMethods(clazz, "s", micPassthroughHook)
+                    log("Hooked ${clazz.simpleName}.s (mic passthrough)")
+                    hooked++
+                }
+            }
+        }.onFailure { log("Failed to hook pub.s candidates: ${it.message}") }
+
+        if (hooked == 0) {
+            runCatching {
+                val tur = findMapsClass(lpparam.classLoader, "tur")
+                XposedBridge.hookAllMethods(tur, "s", micPassthroughHook)
+                log("Hooked tur.s fallback mic passthrough (${tur.name})")
+            }.onFailure { log("Failed to hook tur.s fallback: ${it.message}") }
+        }
+    }
+
+    private fun openMapsKeyboard(host: Any? = null) {
+        if (ProjectedKeyboardOverlay.toggleIfVisible()) {
+            ModuleLog.maps("MAPS-KBD-002", "keyboard toggle — closed overlay", always = true)
+            return
+        }
+        if (ProjectedKeyboardOverlay.shouldSuppressNextOpen()) {
+            ModuleLog.maps(
+                "MAPS-KBD-002",
+                "open suppressed after toggle-close (trailing OPEN broadcast)",
+                always = true
+            )
+            return
+        }
+
+        val carHost = resolveMapsCarHost(host)
+
+        lastSnp?.get()?.let { snp ->
+            runCatching {
+                XposedHelpers.callMethod(snp, "k")
+                ModuleLog.maps("MAPS-003", "snp.k() invoked directly", always = true)
+                return
+            }.onFailure {
+                ModuleLog.maps("MAPS-004", "snp.k() failed: ${it.message}", always = true)
+            }
+        }
+
+        val rek = discoverRekOverlay() ?: lastRel?.get()
+        if (rek != null) {
+            openProjectedKeyboard(rek)
+            return
+        }
+
+        if (carHost != null) {
+            ModuleLog.maps(
+                "MAPS-002",
+                "attempt dispatchKeyEvent keyboard on ${carHost.javaClass.simpleName}",
+                always = true
+            )
+            runCatching {
+                val activity = carHost as? android.app.Activity
+                val content = activity?.findViewById<View>(android.R.id.content)
+                    ?: (carHost as? View)
+                val keyEvent = KeyEvent(KeyEvent.ACTION_UP, 22)
+                if (content?.dispatchKeyEvent(keyEvent) == true) {
+                    ModuleLog.maps("MAPS-003", "dispatchKeyEvent(KEYCODE=22) consumed", always = true)
+                    return
+                }
+                ModuleLog.maps("MAPS-004", "dispatchKeyEvent(KEYCODE=22) not consumed", always = true)
+            }.onFailure {
+                ModuleLog.maps("MAPS-004", "dispatchKeyEvent failed: ${it.message}", always = true)
+            }
+
+            val activity = carHost as? android.app.Activity
+            val ctx = activity ?: runCatching {
+                Class.forName("android.app.ActivityThread")
+                    .getMethod("currentApplication")
+                    .invoke(null) as Context
+            }.getOrNull()
+            if (ctx != null) {
+                ModuleLog.maps(
+                    "MAPS-KBD-001",
+                    "stock keyboard failed — showing custom QWERTY in Maps process",
+                    always = true
+                )
+                ProjectedKeyboardOverlay.show(
+                    context = ctx,
+                    onSubmit = { query -> MapsSearchSubmit.submit(ctx, query) },
+                    preferredDisplay = activity?.display,
+                    hostActivity = activity
+                )
+            }
+            return
+        }
+
+        ModuleLog.maps("MAPS-004", "no rek overlay or car host for keyboard open", always = true)
+    }
+
+    /** Proactive bind: rel.d → snp.j before gearhead opens xcu/xdb. */
+    private fun prepareMapsIme() {
+        resolveMapsCarHost(lastMapsCarHost?.get())
+        discoverRekOverlay()?.let { rek ->
+            ModuleLog.maps("MAPS-002", "PREPARE — rel.d bind chain", always = true)
+            openProjectedKeyboard(rek)
+            return
+        }
+        lastRel?.get()?.let { rek ->
+            ModuleLog.maps("MAPS-002", "PREPARE — cached rel.d bind chain", always = true)
+            openProjectedKeyboard(rek)
+            return
+        }
+        lastSnp?.get()?.let { snp ->
+            runCatching {
+                XposedHelpers.callMethod(snp, "j")
+                ModuleLog.maps("MAPS-003", "PREPARE — snp.j() on cached snp", always = true)
+            }.onFailure {
+                ModuleLog.maps("MAPS-004", "PREPARE snp.j failed: ${it.message}", always = true)
+            }
+            runCatching {
+                XposedHelpers.callMethod(snp, "k")
+                ModuleLog.maps("MAPS-003", "PREPARE — snp.k() on cached snp", always = true)
+            }.onFailure {
+                ModuleLog.maps("MAPS-004", "PREPARE snp.k failed: ${it.message}", always = true)
+            }
+            return
+        }
+        ModuleLog.maps("MAPS-004", "PREPARE — no rek overlay (discover via qhf/activity scan failed)", always = true)
+    }
+
+    /** Find rek via qhf.b field on live activities when lastRel is empty. */
+    private fun notifyGearheadMapsMicVoice() {
+        runCatching {
+            val app = Class.forName("android.app.ActivityThread")
+                .getMethod("currentApplication")
+                .invoke(null) as android.app.Application
+            MicSignal.signalMapsMicVoice(app)
+            val intent = Intent(KeyboardBridge.ACTION_MAPS_MIC_VOICE)
+                .setPackage("com.google.android.projection.gearhead")
+            app.sendBroadcast(intent)
+        }.onFailure {
+            ModuleLog.maps("MAPS-004", "MAPS_MIC_VOICE broadcast failed: ${it.message}", always = true)
+        }
+    }
+
+    private fun discoverRekOverlay(): Any? {
+        val classLoader = mapsClassLoader ?: return null
+        val rekClass = runCatching { findMapsClass(classLoader, "rek") }.getOrNull() ?: return null
+        val qhfClass = runCatching { findMapsClass(classLoader, "qhf") }.getOrNull()
+        runCatching {
+            val atClass = Class.forName("android.app.ActivityThread")
+            val at = XposedHelpers.callStaticMethod(atClass, "currentActivityThread")
+            val app = XposedHelpers.callStaticMethod(atClass, "currentApplication")
+            scanForRek(app, rekClass, qhfClass)?.let { return it }
+            val activities = XposedHelpers.getObjectField(at, "mActivities") as? Map<*, *> ?: return null
+            for (record in activities.values) {
+                val activity = XposedHelpers.getObjectField(record, "activity") ?: continue
+                scanForRek(activity, rekClass, qhfClass)?.let { rek ->
+                    lastRel = WeakReference(rek)
+                    ModuleLog.maps(
+                        "MAPS-002",
+                        "discovered rek overlay via ${activity.javaClass.simpleName}",
+                        always = true
+                    )
+                    return rek
+                }
+            }
+        }.onFailure {
+            ModuleLog.maps("MAPS-004", "rek discovery scan failed: ${it.message}", always = true)
+        }
+        return null
+    }
+
+    private fun scanForRek(root: Any, rekClass: Class<*>, qhfClass: Class<*>?): Any? {
+        if (rekClass.isInstance(root)) return root
+        if (qhfClass != null && qhfClass.isInstance(root)) {
+            runCatching {
+                val rek = XposedHelpers.getObjectField(root, "b")
+                if (rek != null && rekClass.isInstance(rek)) return rek
+            }
+        }
+        for (field in root.javaClass.declaredFields) {
+            if (field.type.isPrimitive) continue
+            runCatching {
+                field.isAccessible = true
+                val value = field.get(root) ?: return@runCatching
+                if (rekClass.isInstance(value)) return value
+                if (qhfClass != null && qhfClass.isInstance(value)) {
+                    val rek = XposedHelpers.getObjectField(value, "b")
+                    if (rek != null && rekClass.isInstance(rek)) return rek
+                }
+            }
+        }
+        return null
+    }
+
+    private fun resolveMapsCarHost(host: Any?): Any? {
+        host?.let {
+            lastMapsCarHost = WeakReference(it)
+            return it
+        }
+        lastMapsCarHost?.get()?.let { return it }
+        return findMapsCarActivity()
+    }
+
+    private fun findMapsCarActivity(): Any? {
+        runCatching {
+            val atClass = Class.forName("android.app.ActivityThread")
+            val at = XposedHelpers.callStaticMethod(atClass, "currentActivityThread")
+            val activities = XposedHelpers.getObjectField(at, "mActivities") as? Map<*, *> ?: return null
+            for (record in activities.values) {
+                val activity = XposedHelpers.getObjectField(record, "activity") ?: continue
+                val name = activity.javaClass.name
+                if (name.contains("tur") || name.contains("tvj") || name.contains("llj") ||
+                    name.contains("biph") || name.contains("GhostActivity") || name.contains("qhf")
+                ) {
+                    lastMapsCarHost = WeakReference(activity)
+                    ModuleLog.maps("MAPS-002", "discovered car activity $name", always = true)
+                    return activity
+                }
+            }
+        }.onFailure {
+            ModuleLog.maps("MAPS-004", "activity scan failed: ${it.message}", always = true)
+        }
+        return null
+    }
+
+    /**
+     * Search bar: qhf.l() → rek.d keyboard. Mic: qhf.k()/i() → pub.s voice (left alone).
      */
     private fun hookSearchBarTap(lpparam: XC_LoadPackage.LoadPackageParam) {
         runCatching {
             val qhf = findMapsClass(lpparam.classLoader, "qhf")
-            val blhxDone = blhxDone(lpparam)
-            val keyboardTap = object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    val method = param.method.name
-                    ModuleLog.maps("MAPS-001", "qhf.$method() — opening projected keyboard", always = true)
+            val blhxDone = runCatching { blhxDone(lpparam) }.getOrNull()
+            val keyboardTap = object : XC_MethodReplacement() {
+                override fun replaceHookedMethod(param: MethodHookParam): Any? {
+                    if (!ModulePrefs.isEnabled()) {
+                        return XposedBridge.invokeOriginalMethod(param.method, param.thisObject, param.args)
+                    }
+                    ModuleLog.maps("MAPS-001", "qhf.l() search tap — opening projected keyboard", always = true)
                     val rek = XposedHelpers.getObjectField(param.thisObject, "b")
                     openProjectedKeyboard(rek)
-                    param.result = blhxDone
+                    return blhxDone
                 }
             }
-            for (method in listOf("l", "k", "i")) {
-                XposedHelpers.findAndHookMethod(qhf, method, keyboardTap)
+            val micPassthrough = object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (!ModulePrefs.isEnabled()) return
+                    mapsMicVoiceActive.set(true)
+                    ModuleLog.maps("MAPS-MIC-001", "qhf.${param.method.name}() mic voice", always = true)
+                }
+
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    mapsMicVoiceActive.remove()
+                }
             }
-            log("Hooked qhf.l/k/i (${qhf.name})")
+            XposedBridge.hookAllMethods(qhf, "l", keyboardTap)
+            for (method in listOf("k", "i")) {
+                XposedBridge.hookAllMethods(qhf, method, micPassthrough)
+            }
+            log("Hooked qhf.l keyboard + qhf.k/i mic (${qhf.name})")
         }.onFailure { log("Failed to hook qhf tap methods: ${it.message}") }
     }
 
@@ -232,55 +744,172 @@ object MapsHooks {
             })
             log("Hooked aodo.m (${aodo.name})")
         }.onFailure { log("Failed to hook aodo.m: ${it.message}") }
+    }
 
+    /**
+     * Car head-unit touches are injected via [biug.c] into Maps' map [Presentation] (biqv),
+     * not into our keyboard [Presentation]. Steer them to the overlay while it is visible.
+     */
+    private fun hookMapsCarTouchIntercept(lpparam: XC_LoadPackage.LoadPackageParam) {
+        val intercept = object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                if (!ModulePrefs.isEnabled()) return
+                if (!ProjectedKeyboardOverlay.isVisible()) return
+                val motionEvent = param.args[0] as? MotionEvent ?: return
+                if (ProjectedKeyboardOverlay.dispatchCarTouch(motionEvent)) {
+                    param.result = Pair.create(1, null)
+                    ModuleLog.maps(
+                        "MAPS-KBD-006",
+                        "car touch steered to keyboard (${param.thisObject.javaClass.simpleName})",
+                        always = true
+                    )
+                }
+            }
+        }
+        var hooked = 0
+        for (shortName in listOf("biue", "biui")) {
+            runCatching {
+                val clazz = findMapsClass(lpparam.classLoader, shortName)
+                XposedHelpers.findAndHookMethod(clazz, "c", MotionEvent::class.java, intercept)
+                log("Hooked $shortName.c car touch intercept (${clazz.name})")
+                hooked++
+            }.onFailure { log("Failed to hook $shortName.c touch intercept: ${it.message}") }
+        }
+        if (hooked == 0) {
+            log("No biug car touch hook installed — overlay taps may pass through")
+        }
+        hookGhostActivityTouchFallback(lpparam)
+    }
+
+    private fun hookGhostActivityTouchFallback(lpparam: XC_LoadPackage.LoadPackageParam) {
         runCatching {
-            val rzb = findMapsClass(lpparam.classLoader, "rzb")
-            XposedHelpers.findAndHookMethod(rzb, "s", object : XC_MethodHook() {
+            val ghost = XposedHelpers.findClass(
+                "com.google.android.apps.auto.client.activity.ghost.GhostActivity",
+                lpparam.classLoader
+            )
+            XposedHelpers.findAndHookMethod(ghost, "dispatchTouchEvent", MotionEvent::class.java, object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!ModulePrefs.isEnabled()) return
-                    ModuleLog.maps("MAPS-001", "pub.s() via rzb blocked — opening projected keyboard", always = true)
-                    openFromLastRel()
-                    param.result = null
+                    if (!ProjectedKeyboardOverlay.isVisible()) return
+                    val motionEvent = param.args[0] as? MotionEvent ?: return
+                    if (ProjectedKeyboardOverlay.dispatchCarTouch(motionEvent)) {
+                        param.result = true
+                    }
                 }
             })
-            log("Hooked rzb.s (${rzb.name})")
-        }.onFailure { log("Failed to hook rzb.s: ${it.message}") }
+            log("Hooked GhostActivity.dispatchTouchEvent fallback")
+        }.onFailure { log("Failed to hook GhostActivity touch fallback: ${it.message}") }
     }
 
     private fun hookProjectedKeyboard(lpparam: XC_LoadPackage.LoadPackageParam) {
-        runCatching {
-            val rel = findMapsClass(lpparam.classLoader, "rel")
-            XposedHelpers.findAndHookMethod(rel, "d", object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    lastRel = WeakReference(param.thisObject)
-                    debugEntry("rel.d() show keyboard overlay")
-                }
+        val rekShowHook = object : XC_MethodHook() {
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                if (!ModulePrefs.isEnabled()) return
+                lastRel = WeakReference(param.thisObject)
+                debugEntry("${param.thisObject.javaClass.simpleName}.d() show keyboard overlay")
+            }
 
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    scheduleShowCarIme(param.thisObject)
-                }
-            })
-            log("Hooked rel.d (${rel.name})")
-        }.onFailure { log("Failed to hook rel.d: ${it.message}") }
+            override fun afterHookedMethod(param: MethodHookParam) {
+                if (!ModulePrefs.isEnabled()) return
+                scheduleShowCarIme(param.thisObject)
+            }
+        }
+
+        runCatching {
+            val rek = findMapsClass(lpparam.classLoader, "rek")
+            var hooked = 0
+            runCatching {
+                val rel = findMapsClass(lpparam.classLoader, "rel")
+                XposedBridge.hookAllMethods(rel, "d", rekShowHook)
+                log("Hooked rel.d (${rel.name})")
+                hooked++
+            }.onFailure { debug("rel.d hook failed: ${it.message}") }
+            if (hooked == 0) {
+                hooked = hookRekImplementorsByDex(lpparam, rek, rekShowHook)
+            }
+            if (hooked == 0) {
+                hooked = hookKeyboardOverlayBySignature(lpparam, rekShowHook)
+            }
+            if (hooked == 0) {
+                log("rek.d overlay hook not found")
+            }
+        }.onFailure { log("Failed to hook rek overlay: ${it.message}") }
 
         runCatching {
             val snp = findMapsClass(lpparam.classLoader, "snp")
-            XposedHelpers.findAndHookMethod(snp, "k", object : XC_MethodHook() {
+            XposedBridge.hookAllMethods(snp, "k", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!ModulePrefs.isEnabled()) return
-                    debugEntry("snp.k() show car IME")
+                    lastSnp = WeakReference(param.thisObject)
+                    ModuleLog.maps("MAPS-003", "snp.k() show car IME", always = true)
                 }
             })
-            XposedHelpers.findAndHookMethod(snp, "j", findMapsClass(lpparam.classLoader, "bisy"), object : XC_MethodHook() {
+            XposedBridge.hookAllMethods(snp, "j", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!ModulePrefs.isEnabled()) return
-                    debugEntry("snp.j() bind car input connection")
+                    lastSnp = WeakReference(param.thisObject)
+                    ModuleLog.maps("MAPS-003", "snp.j() bind car input", always = true)
                 }
             })
             log("Hooked snp.j/k (${snp.name})")
         }.onFailure { log("Failed to hook snp: ${it.message}") }
+    }
+
+    private fun hookRekImplementorsByDex(
+        lpparam: XC_LoadPackage.LoadPackageParam,
+        rek: Class<*>,
+        hook: XC_MethodHook
+    ): Int {
+        var hooked = 0
+        runCatching {
+            val dex = DexFile(lpparam.appInfo.sourceDir)
+            val entries = dex.entries()
+            while (entries.hasMoreElements()) {
+                val name = entries.nextElement()
+                if (!name.startsWith("defpackage.")) continue
+                runCatching {
+                    val clazz = lpparam.classLoader.loadClass(name)
+                    if (clazz.isInterface || !rek.isAssignableFrom(clazz)) return@runCatching
+                    XposedBridge.hookAllMethods(clazz, "d", hook)
+                    log("Hooked rek.d on ${clazz.name} (dex scan)")
+                    hooked++
+                }
+            }
+        }.onFailure { debug("rek dex scan failed: ${it.message}") }
+        return hooked
+    }
+
+    /** rel-like overlay: void d() plus void e(String, cbwl, ccxd) even when rek interface moved. */
+    private fun hookKeyboardOverlayBySignature(
+        lpparam: XC_LoadPackage.LoadPackageParam,
+        hook: XC_MethodHook
+    ): Int {
+        var hooked = 0
+        runCatching {
+            val dex = DexFile(lpparam.appInfo.sourceDir)
+            val entries = dex.entries()
+            while (entries.hasMoreElements()) {
+                val name = entries.nextElement()
+                if (!name.startsWith("defpackage.")) continue
+                runCatching {
+                    val clazz = lpparam.classLoader.loadClass(name)
+                    if (clazz.isInterface) return@runCatching
+                    val methods = clazz.declaredMethods
+                    val hasShow = methods.any {
+                        it.name == "d" && it.parameterTypes.isEmpty() && it.returnType == Void.TYPE
+                    }
+                    val hasSubmit = methods.any {
+                        it.name == "e" && it.parameterTypes.size == 3 &&
+                            it.parameterTypes[0] == String::class.java
+                    }
+                    if (!hasShow || !hasSubmit) return@runCatching
+                    XposedBridge.hookAllMethods(clazz, "d", hook)
+                    log("Hooked keyboard overlay ${clazz.name} (signature scan)")
+                    hooked++
+                }
+            }
+        }.onFailure { debug("keyboard overlay signature scan failed: ${it.message}") }
+        return hooked
     }
 
     /** trt.i() feeds keyboard/driving restriction into header view model. */
@@ -304,6 +933,18 @@ object MapsHooks {
     }
 
     private fun openProjectedKeyboard(rek: Any) {
+        if (ProjectedKeyboardOverlay.toggleIfVisible()) {
+            ModuleLog.maps("MAPS-KBD-002", "keyboard toggle — closed overlay", always = true)
+            return
+        }
+        if (ProjectedKeyboardOverlay.shouldSuppressNextOpen()) {
+            ModuleLog.maps(
+                "MAPS-KBD-002",
+                "rek.d suppressed after toggle-close",
+                always = true
+            )
+            return
+        }
         lastRel = WeakReference(rek)
         runCatching {
             XposedHelpers.callMethod(rek, "d")
@@ -314,30 +955,121 @@ object MapsHooks {
         scheduleShowCarIme(rek)
     }
 
-    private fun openFromLastRel() {
-        val rel = lastRel?.get()
-        if (rel == null) {
-            ModuleLog.maps("MAPS-004", "No cached rel overlay for keyboard open", always = true)
-            return
-        }
+    private fun openFromLastRel(): Boolean {
+        val rel = lastRel?.get() ?: return false
         openProjectedKeyboard(rel)
+        return true
+    }
+
+    /** Submit query from custom overlay — rek.e / snp.b / geo intent fallback. */
+    private fun submitSearchQuery(query: String) {
+        if (query.isBlank()) return
+        val rek = discoverRekOverlay() ?: lastRel?.get()
+        if (rek != null) {
+            runCatching {
+                XposedHelpers.callMethod(rek, "e", query, null, null)
+                ModuleLog.maps("MAPS-KBD-001", "submitted via rek.e", always = true)
+                return
+            }.onFailure {
+                ModuleLog.maps("MAPS-KBD-004", "rek.e failed: ${it.message}", always = true)
+            }
+        }
+        lastSnp?.get()?.let { snp ->
+            runCatching {
+                val classLoader = mapsClassLoader ?: throw IllegalStateException("no classloader")
+                val szf = runCatching { findMapsClass(classLoader, "szf") }.getOrNull()
+                val szfValue = szf?.enumConstants?.firstOrNull()
+                XposedHelpers.callMethod(
+                    snp,
+                    "b",
+                    query,
+                    "",
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    szfValue,
+                    null,
+                    false
+                )
+                ModuleLog.maps("MAPS-KBD-001", "submitted via snp.b", always = true)
+                return
+            }.onFailure {
+                ModuleLog.maps("MAPS-KBD-004", "snp.b failed: ${it.message}", always = true)
+            }
+        }
+        prepareMapsIme()
+        val rekRetry = discoverRekOverlay() ?: lastRel?.get()
+        if (rekRetry != null) {
+            runCatching {
+                XposedHelpers.callMethod(rekRetry, "e", query, null, null)
+                ModuleLog.maps("MAPS-KBD-001", "submitted via rek.e after PREPARE", always = true)
+                return
+            }.onFailure {
+                ModuleLog.maps("MAPS-KBD-004", "rek.e retry failed: ${it.message}", always = true)
+            }
+        }
+        submitViaGeoIntent(query)
+    }
+
+    private fun submitViaGeoIntent(query: String) {
+        runCatching {
+            val app = Class.forName("android.app.ActivityThread")
+                .getMethod("currentApplication")
+                .invoke(null) as android.app.Application
+            val uri = android.net.Uri.parse("geo:0,0?q=${android.net.Uri.encode(query)}")
+            val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+                setPackage("com.google.android.apps.maps")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            app.startActivity(intent)
+            ModuleLog.maps("MAPS-KBD-001", "submitted via geo intent fallback", always = true)
+        }.onFailure {
+            ModuleLog.maps("MAPS-KBD-004", "geo intent submit failed: ${it.message}", always = true)
+        }
     }
 
     /** rel.d() binds car input (snp.j); reh.b() shows projection IME (snp.k). */
     private fun scheduleShowCarIme(rel: Any) {
         val showIme = Runnable {
             runCatching {
-                val reh = XposedHelpers.getObjectField(rel, "c")
+                val reh = findRehController(rel)
+                    ?: throw IllegalStateException("no reh on ${rel.javaClass.name}")
                 XposedHelpers.callMethod(reh, "b")
-                debug("reh.b() requested car IME")
+                ModuleLog.maps("MAPS-003", "reh.b() requested car IME", always = true)
             }.onFailure { log("reh.b() failed: ${it.message}") }
         }
         val anchor = runCatching { XposedHelpers.callMethod(rel, "f") as? View }.getOrNull()
+            ?: runCatching {
+                val field = rel.javaClass.declaredFields.firstOrNull { it.type == View::class.java }
+                field?.isAccessible = true
+                field?.get(rel) as? View
+            }.getOrNull()
         if (anchor != null) {
             anchor.post(showIme)
         } else {
             showIme.run()
         }
+    }
+
+    private fun findRehController(overlay: Any): Any? {
+        runCatching {
+            val reh = XposedHelpers.getObjectField(overlay, "c")
+            if (reh != null) return reh
+        }
+        for (field in overlay.javaClass.declaredFields) {
+            if (field.type.isPrimitive) continue
+            runCatching {
+                field.isAccessible = true
+                val value = field.get(overlay) ?: return@runCatching
+                if (value.javaClass.methods.any { it.name == "b" && it.parameterTypes.isEmpty() }) {
+                    return value
+                }
+            }
+        }
+        return null
     }
 
     private fun blhxDone(lpparam: XC_LoadPackage.LoadPackageParam): Any {

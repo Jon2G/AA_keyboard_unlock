@@ -35,7 +35,7 @@ When the toggle is **off**, all hooks are no-ops — stock Android Auto behavior
 
 3. **LSPosed Manager** → Modules → enable **AA Keyboard Unlock** → scope **both**:
    - Android Auto (`com.google.android.projection.gearhead`)
-   - Google Maps (`com.google.android.apps.maps`)
+   - Google Maps (`com.google.android.apps.maps`) — enable for **all processes** (including `:car` if shown)
 
 4. Open **AA Keyboard Unlock** → enable **Unlock keyboard while active**
 
@@ -75,6 +75,28 @@ Phone (gearhead)                    Phone (maps)
   sensor spoof ──► parked state       kur/qha/qhf ──► keyboard tap
   xdl/xdu unlock ──► QWERTY IME       snp.k ──► car input IPC ──► gearhead IME
 ```
+
+## Maps AA search — log checklist
+
+After a search bar tap you should see **at least one** of:
+
+- `MAPS-KBD-003 attach target=tws-Presentation:…/tws:N` + keyboard visible on **car**
+- `MAPS-003 snp.j()` / `snp.k()` or `reh.b() requested car IME` (stock path — rare)
+- `GH-MAPS-000 cached active IME service`
+
+You should **not** see `kxe.ac type=6` on search tap. Real header mic tap should log `MAPS-MIC-001` and/or `GH-MIC-001`.
+
+Full failure history and architecture: [docs/LEARNINGS_AND_FAILURES.md](docs/LEARNINGS_AND_FAILURES.md), [docs/KEYBOARD_DEBUG_POSTMORTEM.md](docs/KEYBOARD_DEBUG_POSTMORTEM.md).
+
+| Test | Expected | Must NOT see |
+|------|----------|--------------|
+| Tap search bar | `tws-Presentation` attach + QWERTY on car; map visible above keys | `kxe.ac type=6`, white full-screen overlay |
+| Tap keyboard icon (Voice Plate) | `GH-ICON-001` + same as search | Mic dictation UI on search path |
+| Tap map above keyboard | `MAPS-KBD-002 tap outside keyboard` | — |
+| Tap search while keyboard open | `MAPS-KBD-002 keyboard toggle` | — |
+| Change AA layout | `CLOSE_MAPS_KEYBOARD` + overlay hidden | — |
+| Tap header mic (voice) | `MAPS-MIC-001` + dictation UI | `kxe.F(10) blocked` on mic tap |
+| Hint text | `MAPS-HINT-001` / `GH-HINT-001` | "Voice only while driving" |
 
 ## Testing with DHU
 
