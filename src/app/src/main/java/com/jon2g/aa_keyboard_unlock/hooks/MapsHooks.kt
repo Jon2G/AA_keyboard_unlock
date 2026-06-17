@@ -590,46 +590,66 @@ object MapsHooks {
         }
     }
 
-    /** Trace voice-only resource loads — no string rewrite. */
+    /** Trace driving-related resource loads — no string rewrite. */
     private fun hookDrivingResourceTrace(ctx: HookContext) {
+        val traceHook = object : MethodHook() {
+            override fun beforeHookedMethod(param: HookParam) {
+                if (!ModulePrefs.isEnabled()) return
+                val resId = param.args[0] as? Int ?: return
+                val kind = tracedDrivingResKind(resId) ?: return
+                ModuleLog.maps(
+                    "MAPS-DRIVE-008",
+                    "$kind res load caller=${MapsDrivingTrace.formatCallerStack()}",
+                    always = true
+                )
+            }
+
+            override fun afterHookedMethod(param: HookParam) {
+                if (!ModulePrefs.isEnabled()) return
+                val resId = param.args[0] as? Int ?: return
+                val kind = tracedDrivingResKind(resId) ?: return
+                val text = when (val result = param.result) {
+                    is String -> result
+                    is CharSequence -> result.toString()
+                    else -> return
+                }
+                val stack = MapsDrivingTrace.formatCallerStack()
+                ModuleLog.maps(
+                    "MAPS-DRIVE-008",
+                    "$kind resId=$resId text=\"${text.take(50)}\" stack=$stack",
+                    always = true
+                )
+            }
+        }
         runCatching {
             HookChains.findAndHookMethod(
                 xposed,
                 android.content.res.Resources::class.java,
                 "getString",
-                object : MethodHook() {
-                    override fun beforeHookedMethod(param: HookParam) {
-                        if (!ModulePrefs.isEnabled()) return
-                        val resId = param.args[0] as? Int ?: return
-                        if (resId != MapsInstallProbe.voiceOnlyResId || resId == 0) return
-                        ModuleLog.maps(
-                            "MAPS-DRIVE-008",
-                            "voiceOnly getString caller=${MapsDrivingTrace.formatCallerStack()}",
-                            always = true
-                        )
-                    }
-
-                    override fun afterHookedMethod(param: HookParam) {
-                        if (!ModulePrefs.isEnabled()) return
-                        val resId = param.args[0] as? Int ?: return
-                        val voiceId = MapsInstallProbe.voiceOnlyResId
-                        val searchId = MapsInstallProbe.searchHintResId
-                        if (voiceId == 0 && searchId == 0) return
-                        if (resId != voiceId && resId != searchId) return
-                        val text = param.result as? String ?: return
-                        val kind = if (resId == voiceId) "voiceOnly" else "searchHint"
-                        val stack = MapsDrivingTrace.formatCallerStack()
-                        ModuleLog.maps(
-                            "MAPS-DRIVE-008",
-                            "$kind resId=$resId text=\"${text.take(50)}\" stack=$stack",
-                            always = true
-                        )
-                    }
-                },
+                traceHook,
                 Int::class.javaPrimitiveType!!,
             )
-            log("Hooked Resources.getString driving trace (no rewrite)")
-        }.onFailure { log("Failed to hook Resources.getString trace: ${it.message}") }
+            HookChains.findAndHookMethod(
+                xposed,
+                android.content.res.Resources::class.java,
+                "getText",
+                traceHook,
+                Int::class.javaPrimitiveType!!,
+            )
+            log("Hooked Resources.getString/getText driving trace (no rewrite)")
+        }.onFailure { log("Failed to hook Resources driving trace: ${it.message}") }
+    }
+
+    private fun tracedDrivingResKind(resId: Int): String? {
+        if (resId == 0) return null
+        return when (resId) {
+            MapsInstallProbe.voiceOnlyResId -> "voiceOnly".takeIf { MapsInstallProbe.voiceOnlyResId != 0 }
+            MapsInstallProbe.searchHintResId -> "searchHint".takeIf { MapsInstallProbe.searchHintResId != 0 }
+            MapsInstallProbe.keyboardDeniedResId -> "keyboardDenied".takeIf {
+                MapsInstallProbe.keyboardDeniedResId != 0
+            }
+            else -> null
+        }
     }
 
     private fun hookLazyImeReceiverRegistration(ctx: HookContext) {

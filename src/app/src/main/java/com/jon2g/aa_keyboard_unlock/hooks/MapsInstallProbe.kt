@@ -18,6 +18,10 @@ object MapsInstallProbe {
     var searchHintResId: Int = 0
         private set
 
+    @Volatile
+    var keyboardDeniedResId: Int = 0
+        private set
+
     data class InstallAudit(
         var kurHintHooks: Int = 0,
         var qhfTapHooks: Int = 0,
@@ -40,9 +44,11 @@ object MapsInstallProbe {
             val res = app.resources
             voiceOnlyResId = res.getIdentifier("CAR_VOICE_ONLY_WHEN_DRIVING", "string", packageName)
             searchHintResId = res.getIdentifier("CAR_SEARCH_HINT", "string", packageName)
+            keyboardDeniedResId = res.getIdentifier("CAR_CANT_USE_KEYBOARD_WHILE_DRIVING", "string", packageName)
             ModuleLog.maps(
                 "MAPS-DRIVE-010",
-                "hint resIds (app ready) voiceOnly=$voiceOnlyResId searchHint=$searchHintResId",
+                "hint resIds (app ready) voiceOnly=$voiceOnlyResId searchHint=$searchHintResId " +
+                    "keyboardDenied=$keyboardDeniedResId",
                 always = true
             )
         }.onFailure {
@@ -67,9 +73,11 @@ object MapsInstallProbe {
             val pkg = ctx.packageName
             voiceOnlyResId = res.getIdentifier("CAR_VOICE_ONLY_WHEN_DRIVING", "string", pkg)
             searchHintResId = res.getIdentifier("CAR_SEARCH_HINT", "string", pkg)
+            keyboardDeniedResId = res.getIdentifier("CAR_CANT_USE_KEYBOARD_WHILE_DRIVING", "string", pkg)
             ModuleLog.maps(
                 "MAPS-DRIVE-010",
-                "hint resIds voiceOnly=$voiceOnlyResId searchHint=$searchHintResId pkg=$pkg",
+                "hint resIds voiceOnly=$voiceOnlyResId searchHint=$searchHintResId " +
+                    "keyboardDenied=$keyboardDeniedResId pkg=$pkg",
                 always = true
             )
         }.onFailure {
@@ -82,6 +90,8 @@ object MapsInstallProbe {
             "CAR_VOICE_ONLY_WHEN_DRIVING",
             "Voice only while driving",
             "CAR_SEARCH_HINT",
+            "CAR_CANT_USE_KEYBOARD_WHILE_DRIVING",
+            "Can't use keyboard while driving",
         )
         for (path in ctx.sourcePaths) {
             val hits = DexHooks.findClassesReferencingStrings(path, needles, limit = 12)
@@ -171,7 +181,7 @@ object MapsInstallProbe {
                 "trtHooks=${audit.trtHooks} carParamsHooks=${audit.carParamsHooks} " +
                 "snpHooks=${audit.snpHooks} voiceBypassHooks=${audit.voiceBypassHooks} " +
                 "voiceOnlyPathHooks=${audit.voiceOnlyPathHooks} " +
-                "voiceOnlyResId=$voiceOnlyResId",
+                "voiceOnlyResId=$voiceOnlyResId keyboardDeniedResId=$keyboardDeniedResId",
             always = true
         )
     }

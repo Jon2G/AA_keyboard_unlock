@@ -24,6 +24,7 @@ object MapsVoiceOnlyPathHooks {
         hooked += hookOizResourceGetters(xposed, classLoader)
         hooked += hookQjgDrivingState(xposed, classLoader)
         hooked += hookQjhFactories(xposed, classLoader)
+        hooked += hookCarSearchUiStateConstructors(xposed, classLoader)
         for (shortName in TRACED_SHORT_NAMES) {
             hooked += hookTracedClassConstructors(xposed, classLoader, shortName)
         }
@@ -49,12 +50,17 @@ object MapsVoiceOnlyPathHooks {
                     override fun beforeHookedMethod(param: HookParam) {
                         if (!ModulePrefs.isEnabled()) return
                         val voiceId = MapsInstallProbe.voiceOnlyResId
-                        if (voiceId == 0) return
+                        val keyboardDeniedId = MapsInstallProbe.keyboardDeniedResId
+                        if (voiceId == 0 && keyboardDeniedId == 0) return
                         val resId = param.args.firstOrNull { it is Int } as? Int ?: return
-                        if (resId != voiceId) return
+                        val kind = when (resId) {
+                            voiceId -> "voiceOnly"
+                            keyboardDeniedId -> "keyboardDenied"
+                            else -> return
+                        }
                         ModuleLog.maps(
                             "MAPS-DRIVE-012",
-                            "oiz.${method.name} voiceOnly resId=$resId " +
+                            "oiz.${method.name} $kind resId=$resId " +
                                 "args=${formatArgs(param.args)} caller=${MapsDrivingTrace.formatCallerStack()}",
                             always = true
                         )
@@ -140,6 +146,64 @@ object MapsVoiceOnlyPathHooks {
         return hooked
     }
 
+    /** qjb UiState ctors — force isMicRestricted / isKeyboardRestricted false at construction. */
+    private fun hookCarSearchUiStateConstructors(
+        xposed: XposedInterface,
+        classLoader: ClassLoader,
+    ): Int {
+        val qjb = loadClass(classLoader, "qjb") ?: return 0
+        var hooked = 0
+        for (ctor in qjb.declaredConstructors) {
+            val params = ctor.parameterTypes
+            val isUiStateShape = MapsCarUiStatePatches.isCarSearchUiStateConstructor(params) ||
+                params.count {
+                    it == Boolean::class.javaPrimitiveType || it == Boolean::class.java
+                } >= 2
+            if (!isUiStateShape) continue
+            if (!hookOnce("${qjb.name}#<init>#ui#${params.size}")) continue
+            runCatching {
+                HookChains.hookExecutable(xposed, ctor, object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        val forced = if (MapsCarUiStatePatches.isCarSearchUiStateConstructor(params)) {
+                            MapsCarUiStatePatches.forceCarSearchUiStateConstructorBools(param.args)
+                        } else {
+                            forceAllRestrictionBools(param.args, params)
+                        }
+                        if (forced > 0) {
+                            ModuleLog.maps(
+                                "MAPS-DRIVE-012",
+                                "qjb.<init> forced $forced UiState restriction bool(s) false",
+                                always = true
+                            )
+                        }
+                    }
+                })
+                hooked++
+                ModuleLog.maps(
+                    "MAPS-DRIVE-012",
+                    "hooked qjb.<init>(${params.joinToString { it.simpleName }})",
+                    always = true
+                )
+            }
+        }
+        return hooked
+    }
+
+    private fun forceAllRestrictionBools(args: Array<Any?>, params: Array<Class<*>>): Int {
+        val booleanPrimitive = Boolean::class.javaPrimitiveType!!
+        var forced = 0
+        for (index in params.indices) {
+            val type = params[index]
+            if (type != booleanPrimitive && type != Boolean::class.java) continue
+            if (args.getOrNull(index) == true) {
+                args[index] = false
+                forced++
+            }
+        }
+        return forced
+    }
+
     /** qjg/qjh ctors with restriction bools — force driving/mic flags false at source. */
     private fun hookTracedClassConstructors(
         xposed: XposedInterface,
@@ -160,6 +224,7 @@ object MapsVoiceOnlyPathHooks {
                 HookChains.hookExecutable(xposed, ctor, object : MethodHook() {
                     override fun beforeHookedMethod(param: HookParam) {
                         if (!ModulePrefs.isEnabled()) return
+                        val uiStatePatched = MapsCarUiStatePatches.patchArgs(param.args)
                         var forced = 0
                         for (index in boolIndices) {
                             if (param.args.getOrNull(index) == true) {
@@ -167,11 +232,11 @@ object MapsVoiceOnlyPathHooks {
                                 forced++
                             }
                         }
-                        if (forced > 0) {
+                        if (forced > 0 || uiStatePatched > 0) {
                             ModuleLog.maps(
                                 "MAPS-DRIVE-012",
                                 "$shortName.<init> forced $forced restriction bool(s) false " +
-                                    "args=${formatArgs(param.args)}",
+                                    "uiStatePatched=$uiStatePatched args=${formatArgs(param.args)}",
                                 always = true
                             )
                         } else if (ModulePrefs.isDebug()) {
