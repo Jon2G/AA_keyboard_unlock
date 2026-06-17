@@ -1,35 +1,29 @@
-# Maps-on-AA Keyboard — Testing Strategy
+# Maps-on-AA — Testing Strategy
 
-When fixes “do nothing,” the hooks may be firing while UI lands on the **wrong display** or the **wrong process**. Use this matrix to isolate *which layer* fails before changing more hook logic.
+Use this matrix to isolate *which layer* fails. After the **driving-trace pivot** (2026-06-17), Maps hooks are **log-only**; gearhead still unlocks keyboard for **external** Car apps.
 
 ## Current status (2026-06-17)
 
 | Layer | Expected |
 |-------|----------|
-| `kcw.k(10)` + broadcasts | **Pass** |
-| Stock `rek` / `snp` / `xcu` | **Fail** (fallback overlay) |
-| `tws-Presentation` overlay | **Pass** — keyboard on car |
-| Map visible above keyboard | **Pass** (transparent Presentation) |
-| Close keyboard (✕, tap map, re-tap search) | **Pass** |
-| Auto-close on AA layout change | **Pass** |
-| Voice Plate keyboard icon | **Pass** (`GH-ICON-001`) |
-| Submit search from overlay | **Verify** (`MAPS-KBD-001 submitted via …`) |
+| Gearhead sensor spoof + `xdl` unlock | **Pass** for external apps |
+| Maps custom overlay / label rewrite / `kcw.k(10)` intercept | **Removed** |
+| Maps driving trace (`MAPS-DRIVE-*`) | **Active** when **Debug** on |
+| Maps search keyboard while driving | **Stock** (voice-only label) — not modified |
 
-**Conclusion:** Primary engineering focus shifted from “hooks not installed” to **overlay UX**, **submit path**, and **stock IME** (optional).
+**Engineering focus:** find the Maps in-process gate that loads `CAR_VOICE_ONLY_WHEN_DRIVING` vs `CAR_SEARCH_HINT`, then design a minimal patch.
 
 ---
 
 ## Phase 0 — Preflight (5 min)
 
-1. **LSPosed scope:** LSPosed **2.1+** required (libxposed API 101+). Module should **not** show as legacy in Manager.
+1. **LSPosed scope:** LSPosed **2.1+** (libxposed API 101+).
    - `com.google.android.projection.gearhead`
-   - `com.google.android.apps.maps` — **all processes** (including `:car` if listed)
+   - `com.google.android.apps.maps` — **all processes** (including `:car`)
 
-2. Module enabled + **Debug** toggle for verbose `[HOOK]` lines.
+2. Module enabled + **Debug** toggle (**required** for `MAPS-DRIVE-*`).
 
-3. **Build identity** — log must show your APK path / version.
-
-4. **Capture:**
+3. **Capture:**
 
 ```bash
 adb logcat -c
@@ -37,7 +31,7 @@ adb logcat -c
 adb logcat -d | grep -E 'AAKeyboardUnlock|LSPosed-Bridge.*AAKeyboard' > logs/log/test_$(date +%Y-%m-%dT%H-%M-%S).log
 ```
 
-5. **Triage:** `./scripts/triage_log.sh logs/log/your_test.log`
+4. **Triage:** `./scripts/triage_log.sh logs/log/your_test.log`
 
 ---
 
@@ -47,109 +41,104 @@ Wait 3 seconds between actions.
 
 | ID | Action | Proves | Pass log IDs |
 |----|--------|--------|--------------|
-| **A** | Open AA + Maps only | Hooks load | `[MODULE] onModuleLoaded`, `[GH-INSTALL]`, `[MAPS-INSTALL]` |
-| **B** | Tap **search** once | Keyboard chain | `kcw.k(10)`, `MAPS-KBD-003 attach target=tws-Presentation` |
-| **B2** | Type + **Search** on overlay | Submit path | `MAPS-KBD-001 submitted via rek.e` / `snp.b` |
-| **C** | Tap **keyboard icon** (was mic) | Icon rewrite + same path as B | `GH-ICON-001`, then same as B |
-| **D** | Tap **map area** above keys | Dismiss | `MAPS-KBD-002 tap outside keyboard` |
-| **E** | Tap **search** again while open | Toggle close | `MAPS-KBD-002 keyboard toggle` |
-| **F** | Open keyboard, switch AA layout | Auto-dismiss | `CLOSE_MAPS_KEYBOARD`, `configuration changed` / `stopped` |
-| **G** | Tap **✕** | Close button | `GH-KBD-002 hide overlay` |
+| **A** | Open AA + Maps only | Hooks load | `[GH-INSTALL]`, `[MAPS-INSTALL]` |
+| **B** | External app text field (e.g. messaging) | Gearhead IME | `xcu.h`, `xdb.onStart`, `forced c=false` |
+| **H1** | Open Maps; DHU **driving** on; **do not tap** search | Driving label trace | `MAPS-DRIVE-005 qha`, `MAPS-DRIVE-008 voiceOnly` |
+| **H2** | Same; DHU **parked** / sensors stopped | Parked label trace | `MAPS-DRIVE-005 qha`, `MAPS-DRIVE-009` or `008 searchHint` — **no** voice-only `008` |
+| **H3** | Toggle driving ↔ parked; capture one log each | Correlation | Compare `MAPS-DRIVE-007` field dumps side by side |
 
 **Decision tree:**
 
 ```
 A fails → LSPosed scope / module not loaded
-B fails, no MAPS-KBD-003 → overlay attach (check display dump)
-B passes, keyboard on car but white sheet → Presentation transparency regression
-D/E/G fail → KeyboardDismissRoot / hide path regression
-F fails → CLOSE broadcast or lifecycle hooks
+B fails → gearhead hooks (see gearhead_hook_targets.md)
+H*: no MAPS-DRIVE lines → enable Debug, relaunch Maps
+H1 has 008 voiceOnly, H2 does not → trace working; next step is hook the decision point
+H1 and H2 identical → restriction may be cached or outside traced paths — expand 011 API dump
 ```
 
 ---
 
 ## Phase 2 — Event ID checklist
 
-### Search keyboard (overlay path — current default)
+### Maps driving restriction (primary)
 
 | ID | Required? | Interpretation |
 |----|-------------|----------------|
-| `GH-MAPS-002` PREPARE broadcast | Yes | gearhead → Maps IPC |
-| `MAPS-001` OPEN received | Yes | Maps receiver alive |
-| `MAPS-KBD-001` showing custom QWERTY | Yes | Fallback reached |
-| `MAPS-KBD-003` `tws-Presentation:…/tws:N` | **Yes** | Car-visible attach |
-| `MAPS-KBD-005` `800x<H>` | Yes | Panel laid out (H ≈ 200–380) |
-| `MAPS-KBD-002` dismiss lines | On close tests | Toggle / tap-outside / nav |
+| `MAPS-DRIVE-003` | Yes (H1/H2) | Install audit: kur count, qha/qwt/qhf/trt, res ids |
+| `MAPS-DRIVE-005` | Yes | `qha` / `qwt` constructed |
+| `MAPS-DRIVE-007` | Desired | Field dump after construct — compare driving vs parked |
+| `MAPS-DRIVE-008` | Driving session | `voiceOnly` + `resId` + stack |
+| `MAPS-DRIVE-009` | Parked session | Search-hint text |
+| `MAPS-DRIVE-006` | Info | `qhf` routing |
+| `MAPS-DRIVE-004` | Info | `trt`-like `i()` returned true |
+| `MAPS-DRIVE-010` / `011` | Info | Dex / class API at install |
+| `MAPS-DRIVE-020` | Info | Outgoing CarText before gearhead IPC |
 
-### Search keyboard (stock path — stretch)
+Capture for test H:
+
+```bash
+adb logcat -c
+# open AA + Maps; wait for search bar — do not tap
+adb logcat -d | grep -E 'AAKeyboardUnlock|LSPosed-Bridge.*AAKeyboard' > logs/log/maps_drive_$(date +%Y-%m-%dT%H-%M-%S).log
+./scripts/triage_log.sh logs/log/maps_drive_*.log
+```
+
+### Gearhead external keyboard
 
 | ID | Interpretation |
 |----|----------------|
-| `MAPS-003 snp.j` / `snp.k` | Stock bind/show |
-| `GH-MAPS-000` cached xcu | Projected IME |
+| `xcu.h` | External keyboard start requested |
+| `xdb.onStart` / `xdl.d` | IME fragment unlock |
+| `gxy.d` / `lgz.a` | SearchTemplate keyboard allowed |
 
-### Mic / keyboard icon
+### Must NOT see (post-pivot)
 
-| ID | Interpretation |
-|----|----------------|
-| `GH-ICON-001` | Mic replaced with keyboard icon |
-| `GH-ICON-002` | Icon hidden (drawable lookup failed) |
-| `GH-MIC-001` / `MAPS-MIC-001` | Real mic tap (header mic — voice) |
-
-### Must NOT see
-
-| ID | Meaning |
-|----|---------|
-| `car-WindowManager` attach | Crash path |
-| `force-started PhoneKeyboardActivity` | Phone flash |
-| `kxe.ac type=6` on search tap | Dictation instead of keyboard |
-| White full-screen overlay | `TouchCaptureShell` regression |
-| Maps ANR after attach | WM on wrong display context |
+| Pattern | Meaning |
+|---------|---------|
+| `GH-MAPS-001` / `kcw.k(10)` intercept | Removed Maps keyboard path |
+| `GH-KBD-001` / `MAPS-KBD-003` | Removed custom overlay |
+| `MAPS-HINT-001` / `GH-HINT-001` | Removed label rewrites |
 
 ---
 
 ## Phase 3 — Environment matrix
 
-Run phase 1 **B + D + F** on each setup:
+Run **H1 + H2** on each setup:
 
 | Setup | Notes |
 |-------|-------|
-| DHU + stopped sensors INI | Desktop car display |
+| DHU + driving INI | Toggle `driving_status` / speed sensors |
+| DHU + stopped sensors INI | Parked-like |
 | Wired USB AA | Real head unit |
-| Wireless AA | Timing may differ for broadcasts |
 
-Record: map visible above keyboard? dismiss works? `MAPS-KBD-003` display id?
+Record: search bar label text vs `MAPS-DRIVE-008` / `009` lines.
 
 ---
 
-## Phase 4 — Known failure modes (don’t re-debug)
+## Phase 4 — Known failure modes
 
-1. Overlay on phone `DecorView` only — pre–`tws-Presentation` builds.
-2. `car-WindowManager` ANR — never re-enable.
-3. Opaque full-screen shell — blocks close + hides map (fixed 2026-06-17).
-4. `suppressNextOpen` after toggle — trailing OPEN must not reopen for 800ms.
-5. `rek` missing in main Maps process — overlay fallback is expected.
-6. SearchTemplate `gig.bi` hardcoded mic — Maps uses Voice Plate; icon hook is on `VoicePlateWidget`.
+1. **Debug off** — only `[MAPS-INSTALL]` appears; no `MAPS-DRIVE-*`.
+2. **Wrong Maps process** — scope all processes; compare `MAPS-DRIVE-003 process=`.
+3. **Gearhead spoof ≠ Maps label** — parking spoof does not change Maps resource pick; trace Maps-side state.
+4. **Stale build** — overlay/hint log IDs mean old APK still installed.
 
 ---
 
 ## Phase 5 — What to send when asking for help
 
-One log per test ID (B, D, E, F, G), with:
+One log per test (H1 driving, H2 parked), with:
 
-1. Environment (DHU / USB / wireless).
+1. Environment (DHU driving on/off).
 2. `triage_log.sh` output.
-3. `MAPS-KBD-003` and `MAPS-KBD-005` lines.
-4. Car screen: map visible? keyboard closable?
-5. APK install path from log.
+3. Full `MAPS-DRIVE-003` line + last `005`/`007`/`008` or `009`.
+4. Search bar label as shown on car screen.
+5. APK version from log.
 
 ---
 
 ## Current engineering priority
 
-1. **Submit path** — `rek.e` / `snp.b` after overlay Search key.
-2. **Stock IME** — scope `maps:car`, discover `rek` in correct process.
-3. **Real mic** — header mic (`tur.s`) still voice; don't confuse with keyboard icon.
-4. **Regression guard** — transparent Presentation + dismiss on every overlay change.
-
-Do not add new attach paths without logging `MAPS-KBD-003` + `MAPS-KBD-005`.
+1. **Identify decision point** — field or caller that precedes `Resources.getText(voiceOnly)`.
+2. **Minimal patch** — once traced, patch only that gate (not overlay/broadcasts).
+3. **Regression guard** — keep gearhead external-app unlock unchanged.

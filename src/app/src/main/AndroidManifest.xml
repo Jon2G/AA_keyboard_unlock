@@ -9,6 +9,10 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.AAKeyboardUnlock">
 
+        <meta-data
+            android:name="xposedsharedprefs"
+            android:value="true" />
+
         <activity
             android:name=".SettingsActivity"
             android:exported="true"

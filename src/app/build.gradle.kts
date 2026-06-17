@@ -34,12 +34,22 @@ android {
     }
 
     buildTypes {
+        debug {
+            buildConfigField("boolean", "MODULE_DEBUG", "true")
+        }
         release {
             isMinifyEnabled = false
+            buildConfigField("boolean", "MODULE_DEBUG", "false")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfigs.findByName("release")?.let { signingConfig = it }
+        }
+        create("logging") {
+            initWith(getByName("release"))
+            buildConfigField("boolean", "MODULE_DEBUG", "true")
+            versionNameSuffix = "-log"
             signingConfigs.findByName("release")?.let { signingConfig = it }
         }
     }

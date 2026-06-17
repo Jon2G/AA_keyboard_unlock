@@ -10,19 +10,26 @@ class HookContext(
     val classLoader: ClassLoader,
     val packageName: String,
     val processName: String,
-    val sourcePath: String
+    val sourcePath: String,
+    val sourcePaths: List<String> = listOf(sourcePath)
 ) {
     val dexClassLoader: BaseDexClassLoader
         get() = classLoader as BaseDexClassLoader
 
     companion object {
         fun from(param: PackageReadyParam, xposed: XposedInterface, processName: String): HookContext {
+            val info = param.applicationInfo
+            val paths = buildList {
+                add(info.sourceDir)
+                info.splitSourceDirs?.forEach { split -> add(split) }
+            }
             return HookContext(
                 xposed = xposed,
                 classLoader = param.classLoader,
                 packageName = param.packageName,
                 processName = processName,
-                sourcePath = param.applicationInfo.sourceDir
+                sourcePath = info.sourceDir,
+                sourcePaths = paths
             )
         }
     }

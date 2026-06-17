@@ -4,8 +4,8 @@
     <string name="module_description">Unlocks Android Auto keyboard (gearhead + Google Maps scope) by spoofing stopped/parked vehicle state.</string>
     <string name="enable_title">Unlock keyboard while active</string>
     <string name="enable_summary">Spoofs stopped/parked vehicle state in Android Auto</string>
-    <string name="debug_title">Verbose logging</string>
-    <string name="debug_summary">Write hook activity to LSPosed log</string>
+    <string name="debug_build_on">Verbose logging: ON (logging build — MAPS-DRIVE traces enabled)</string>
+    <string name="debug_build_off">Verbose logging: OFF (release build — install the -log APK for traces)</string>
     <string name="scope_hint">Enable this module for Android Auto and Google Maps (all processes, including :car) in LSPosed Manager.</string>
     <string name="scope_package">Scope: com.google.android.projection.gearhead, com.google.android.apps.maps</string>
     <string-array name="xposed_scope">

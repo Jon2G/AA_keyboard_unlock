@@ -49,17 +49,11 @@
             android:text="@string/enable_summary"
             android:textAppearance="?attr/textAppearanceBodySmall" />
 
-        <com.google.android.material.materialswitch.MaterialSwitch
-            android:id="@+id/switch_debug"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/debug_title" />
-
         <TextView
+            android:id="@+id/text_debug_build"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:paddingTop="4dp"
-            android:text="@string/debug_summary"
+            android:paddingTop="8dp"
             android:textAppearance="?attr/textAppearanceBodySmall" />
 
     </LinearLayout>

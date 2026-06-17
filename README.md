@@ -10,10 +10,10 @@ LSPosed module that unlocks the Android Auto on-screen keyboard while driving by
 | Scenario | How |
 |----------|-----|
 | External app text fields (WhatsApp reply, messaging, etc.) | Gearhead projection IME (`xcu` → `xdl`/`xdu`) |
-| Google Maps Car search bar | Maps process hooks — label rewrite + keyboard tap routing |
+| Google Maps Car search bar | Maps `Resources` rewrite: voice-only res → search hint (`MAPS-HINT-001`) |
 | Car App SearchTemplate hints | Gearhead `jtg` / template keyboard gates |
 
-The **voice assistant** is left enabled in gearhead (no `hookVoicePlateAndAssistant`). **Google Maps** blocks voice dictation in the Maps process (`aoeb.l`, `pub.s`) and opens the projected keyboard instead — see [maps_hook_targets.md](docs/maps_hook_targets.md).
+**Google Maps** rewrites the Car search voice-only string to the normal search hint when the module is enabled (`2132018912` → `2132018832`). Install the **logging** APK or a **debug** build for `MAPS-DRIVE-*` traces.
 
 When the toggle is **off**, all hooks are no-ops — stock Android Auto behavior is unchanged.
 
@@ -26,7 +26,11 @@ When the toggle is **off**, all hooks are no-ops — stock Android Auto behavior
 
 ## Install
 
-1. Download the latest APK from [GitHub Releases](https://github.com/Jon2G/AA_keyboard_unlock/releases) (`aa-keyboard-unlock-vX.Y.Z.apk`), or build locally (see below).
+1. Download from [GitHub Releases](https://github.com/Jon2G/AA_keyboard_unlock/releases):
+   - `aa-keyboard-unlock-vX.Y.Z.apk` — normal use (no verbose logs)
+   - `aa-keyboard-unlock-vX.Y.Z-log.apk` — same behavior plus MAPS-DRIVE traces for DHU/debugging
+
+   Or build locally (see below).
 
 2. Install on the phone:
    ```bash

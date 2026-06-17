@@ -6,6 +6,7 @@ import android.content.Context
 import android.database.Cursor
 import android.database.MatrixCursor
 import android.net.Uri
+import com.jon2g.aa_keyboard_unlock.BuildConfig
 
 class ModulePrefsProvider : ContentProvider() {
 
@@ -22,7 +23,7 @@ class ModulePrefsProvider : ContentProvider() {
         val prefs = ModulePrefs.appPrefs(ctx)
         val value = when (uri.lastPathSegment) {
             PATH_ENABLED -> if (prefs.getBoolean(ModulePrefs.KEY_ENABLED, ModulePrefs.DEFAULT_ENABLED)) 1L else 0L
-            PATH_DEBUG -> if (prefs.getBoolean(ModulePrefs.KEY_DEBUG, ModulePrefs.DEFAULT_DEBUG)) 1L else 0L
+            PATH_DEBUG -> if (BuildConfig.MODULE_DEBUG) 1L else 0L
             PATH_MAPS_MIC -> prefs.getLong(ModulePrefs.KEY_MAPS_MIC_UNTIL, 0L)
             else -> return null
         }

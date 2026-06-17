@@ -8,6 +8,7 @@ DHU="${DHU:-/Users/jon2g/android/android-sdk/extras/google/auto/desktop-head-uni
 CONFIG="${CONFIG:-$ROOT/dhu_config/config_stopped_sensors.ini}"
 APK="$ROOT/src/app/build/outputs/apk/debug/app-debug.apk"
 GEARHEAD_PKG="com.google.android.projection.gearhead"
+MAPS_PKG="com.google.android.apps.maps"
 
 echo "== AA Keyboard Unlock — DHU test matrix =="
 
@@ -46,3 +47,13 @@ echo "  D) Toggle module OFF while moving                            => lock ret
 echo ""
 echo "Capture logs (run while testing):"
 echo "  adb logcat -s AAKeyboardUnlock:* LSPosed:* | tee $ROOT/re/dhu_validation.log"
+echo ""
+echo "Force-stopping Google Maps (pick up new hooks on next Car session)..."
+adb shell am force-stop "$MAPS_PKG"
+echo ""
+echo "Refreshing adb connection..."
+adb kill-server 2>/dev/null || true
+adb start-server
+sleep 1
+adb reconnect 2>/dev/null || true
+adb devices -l

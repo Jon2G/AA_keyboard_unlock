@@ -2,10 +2,8 @@ package com.jon2g.aa_keyboard_unlock.hooks
 
 import com.jon2g.aa_keyboard_unlock.xposed.Reflect
 
-object VoicePlateHints {
-    const val MAPS_HOOK_BANNER = "Type anytime"
-    const val KEYBOARD_SEARCH_HINT = MAPS_HOOK_BANNER
-
+/** Detect voice-only / keyboard-blocked hint text for Maps driving trace (no rewriting). */
+object DrivingRestrictionMarkers {
     private val VOICE_ONLY_MARKERS = listOf(
         "Voice only while driving",
         "Select and speak",
@@ -16,13 +14,24 @@ object VoicePlateHints {
         "Say a command",
     )
 
+    private val SEARCH_HINT_MARKERS = listOf(
+        "Search all destinations",
+        "Search here",
+        "CAR_SEARCH_HINT",
+    )
+
     fun isVoiceOnlyText(text: CharSequence?): Boolean {
         if (text.isNullOrEmpty()) return false
         val s = text.toString()
         return VOICE_ONLY_MARKERS.any { marker -> s.contains(marker, ignoreCase = true) }
     }
 
-    /** Extract display text from CarText, gbg/gdo, String, or CharSequence wrappers. */
+    fun isSearchHintText(text: CharSequence?): Boolean {
+        if (text.isNullOrEmpty()) return false
+        val s = text.toString()
+        return SEARCH_HINT_MARKERS.any { marker -> s.contains(marker, ignoreCase = true) }
+    }
+
     fun extractHintText(value: Any?): String? {
         if (value == null) return null
         if (value is CharSequence) return value.toString()
@@ -33,7 +42,6 @@ object VoicePlateHints {
             if (!fromCarText.isNullOrEmpty()) return fromCarText.toString()
         }
 
-        // gbg → gdo (often gej) → der AnnotatedString
         runCatching {
             val gdo = Reflect.getObjectField(value, "a") ?: return@runCatching
             val der = Reflect.getObjectField(gdo, "a")
@@ -47,26 +55,5 @@ object VoicePlateHints {
 
         val fallback = value.toString()
         return if (fallback.isNotEmpty() && fallback != "null") fallback else null
-    }
-
-    fun isVoiceOnlyHint(value: Any?): Boolean {
-        return isVoiceOnlyText(extractHintText(value))
-    }
-
-    fun rewriteIfVoiceOnly(original: String?): String? {
-        if (original == null || !isVoiceOnlyText(original)) return null
-        return MAPS_HOOK_BANNER
-    }
-
-    fun rewriteHintArg(value: Any?): Any? {
-        if (value == null) return null
-        val original = extractHintText(value) ?: return null
-        return if (isVoiceOnlyText(original)) MAPS_HOOK_BANNER else null
-    }
-
-    fun createCarText(classLoader: ClassLoader, hint: String = MAPS_HOOK_BANNER): Any {
-        val carText = Reflect.findClass("androidx.car.app.model.CarText", classLoader)
-        return Reflect.callStaticMethod(carText, "create", hint)
-            ?: throw IllegalStateException("CarText.create returned null")
     }
 }

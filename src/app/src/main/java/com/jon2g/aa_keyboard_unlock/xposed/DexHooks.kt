@@ -36,7 +36,8 @@ object DexHooks {
         sourcePath: String,
         methodName: String,
         parameterCount: Int,
-        hook: MethodHook
+        hook: MethodHook,
+        filter: ((java.lang.reflect.Method) -> Boolean)? = null
     ): Int {
         var hooked = 0
         runCatching {
@@ -52,6 +53,39 @@ object DexHooks {
                         if (method.name != methodName) continue
                         if (method.parameterCount != parameterCount) continue
                         if (Modifier.isAbstract(method.modifiers)) continue
+                        if (filter != null && !filter(method)) continue
+                        HookChains.hookMethod(xposed, method, hook)
+                        hooked++
+                    }
+                }
+            }
+        }
+        return hooked
+    }
+
+    fun hookBooleanMethodsByName(
+        xposed: XposedInterface,
+        classLoader: ClassLoader,
+        sourcePath: String,
+        methodName: String,
+        hook: MethodHook
+    ): Int {
+        var hooked = 0
+        runCatching {
+            val dex = DexFile(sourcePath)
+            val entries = dex.entries()
+            while (entries.hasMoreElements()) {
+                val name = entries.nextElement()
+                if (!name.startsWith("defpackage.")) continue
+                runCatching {
+                    val clazz = classLoader.loadClass(name)
+                    if (clazz.isInterface) return@runCatching
+                    for (method in clazz.declaredMethods) {
+                        if (method.name != methodName) continue
+                        if (Modifier.isAbstract(method.modifiers)) continue
+                        val returnsBoolean = method.returnType == Boolean::class.javaPrimitiveType ||
+                            method.returnType == Boolean::class.java
+                        if (!returnsBoolean) continue
                         HookChains.hookMethod(xposed, method, hook)
                         hooked++
                     }

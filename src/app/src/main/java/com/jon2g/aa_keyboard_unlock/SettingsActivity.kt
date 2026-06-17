@@ -26,11 +26,9 @@ class SettingsActivity : AppCompatActivity() {
             }
         }
 
-        findViewById<MaterialSwitch>(R.id.switch_debug).apply {
-            isChecked = prefs.getBoolean(ModulePrefs.KEY_DEBUG, ModulePrefs.DEFAULT_DEBUG)
-            setOnCheckedChangeListener { _, checked ->
-                ModulePrefs.setDebug(this@SettingsActivity, checked)
-            }
-        }
+        findViewById<android.widget.TextView>(R.id.text_debug_build).text =
+            getString(
+                if (BuildConfig.MODULE_DEBUG) R.string.debug_build_on else R.string.debug_build_off
+            )
     }
 }
