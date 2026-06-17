@@ -1,16 +1,24 @@
 package com.jon2g.aa_keyboard_unlock.hooks
 
+import android.view.View
+import com.jon2g.aa_keyboard_unlock.ModuleLog
 import com.jon2g.aa_keyboard_unlock.prefs.ModulePrefs
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
+import java.lang.ref.WeakReference
 
 object MapsHooks {
-    private const val TAG = "AAKeyboardUnlock"
-
     @Volatile
     private var installedForProcess = false
+
+    @Volatile
+    private var kurAjHookLogged = false
+
+    /** Latest rel overlay instance — used when AA routes search through assistant gRPC (aoeb.l). */
+    @Volatile
+    private var lastRel: WeakReference<Any>? = null
 
     fun install(lpparam: XC_LoadPackage.LoadPackageParam) {
         XposedHelpers.findAndHookMethod(
@@ -28,73 +36,103 @@ object MapsHooks {
     }
 
     private fun installHooks(lpparam: XC_LoadPackage.LoadPackageParam) {
-        log("Installing Maps hooks (enabled=${ModulePrefs.isEnabled()}, debug=${ModulePrefs.isDebug()})")
+        ModuleLog.install(
+            ModuleLog.Process.MAPS,
+            "enabled=${ModulePrefs.isEnabled()} debug=${ModulePrefs.isDebug()} pkg=${lpparam.packageName}"
+        )
         hookSearchHintResolver(lpparam)
         hookHeaderUiState(lpparam)
+        hookDistractionState(lpparam)
         hookSearchBarTap(lpparam)
         hookProjectedKeyboard(lpparam)
+        hookMapsVoiceSession(lpparam)
         hookTrtDrivingFlags(lpparam)
-        log("Maps hooks installed for ${lpparam.packageName}")
+        ModuleLog.maps("MAPS-INSTALL", "hooks installed for ${lpparam.packageName}", always = true)
     }
 
     /**
-     * kur.aJ picks CAR_VOICE_ONLY_WHEN_DRIVING when the driving flag (arg z) is true.
-     * Force parked/keyboard-friendly hint selection at the source.
+     * kur hint resolver — method name obfuscates between Maps builds (aJ may be absent).
+     * Match static String methods taking Context + multiple boolean flags.
      */
     private fun hookSearchHintResolver(lpparam: XC_LoadPackage.LoadPackageParam) {
         runCatching {
             val kur = findMapsClass(lpparam.classLoader, "kur")
-            val contextClass = XposedHelpers.findClass("android.content.Context", lpparam.classLoader)
-            val tqv = findMapsClass(lpparam.classLoader, "tqv")
-            XposedHelpers.findAndHookMethod(
-                kur,
-                "aJ",
-                contextClass,
-                Boolean::class.javaPrimitiveType!!,
-                Boolean::class.javaPrimitiveType!!,
-                tqv,
-                Boolean::class.javaPrimitiveType!!,
-                Boolean::class.javaPrimitiveType!!,
-                Boolean::class.javaPrimitiveType!!,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (!ModulePrefs.isEnabled()) return
-                        debugEntry("kur.aJ() driving=${param.args[1]} keyboardBlocked=${param.args[4]}")
-                        if (param.args[1] == true) {
-                            log("kur.aJ() forced driving=false")
-                            param.args[1] = false
-                        }
-                        if (param.args[4] == true) {
-                            log("kur.aJ() forced keyboardBlocked=false")
-                            param.args[4] = false
-                        }
-                    }
+            val contextClass = android.content.Context::class.java
+            val booleanPrimitive = Boolean::class.javaPrimitiveType!!
+            var hooked = 0
+            for (method in kur.declaredMethods) {
+                if (!java.lang.reflect.Modifier.isStatic(method.modifiers)) continue
+                if (method.returnType != String::class.java) continue
+                val params = method.parameterTypes
+                if (params.isEmpty() || params[0] != contextClass) continue
+                if (params.count { it == booleanPrimitive } < 2) continue
+                XposedBridge.hookMethod(method, kurAjHook())
+                if (!kurAjHookLogged) {
+                    kurAjHookLogged = true
+                    val sig = params.joinToString(",") { it.simpleName }
+                    ModuleLog.maps("MAPS-000", "hook kur hint sig=${method.name}($sig)", always = true)
+                }
+                hooked++
+            }
+            if (hooked == 0) {
+                log("kur hint resolver not found on ${kur.name}")
+            } else {
+                log("Hooked kur hint resolver x$hooked (${kur.name})")
+            }
+        }.onFailure { log("Failed to hook kur hint resolver: ${it.message}") }
 
+        runCatching {
+            XposedHelpers.findAndHookMethod(
+                android.content.res.Resources::class.java,
+                "getString",
+                Int::class.javaPrimitiveType!!,
+                object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         if (!ModulePrefs.isEnabled()) return
-                        val hint = param.result as? String ?: return
-                        if (!VoicePlateHints.isVoiceOnlyText(hint)) return
-                        val context = param.args[0] as android.content.Context
-                        val resId = context.resources.getIdentifier(
-                            "CAR_SEARCH_HINT",
-                            "string",
-                            context.packageName
+                        val original = param.result as? String ?: return
+                        val rewritten = VoicePlateHints.rewriteIfVoiceOnly(original) ?: return
+                        param.result = rewritten
+                        ModuleLog.maps(
+                            "MAPS-HINT-001",
+                            "Resources.getString rewritten \"${original.take(40)}\" -> \"$rewritten\"",
+                            always = true
                         )
-                        if (resId == 0) return
-                        val searchHint = context.getString(resId)
-                        debug("kur.aJ() rewritten voice-only hint -> search hint")
-                        param.result = searchHint
                     }
                 }
             )
-            log("Hooked kur.aJ (${kur.name})")
-        }.onFailure { log("Failed to hook kur.aJ: ${it.message}") }
+            log("Hooked Maps Resources.getString hint rewrite")
+        }.onFailure { log("Failed to hook Maps Resources.getString: ${it.message}") }
     }
 
-    /**
-     * qha carries isMicRestricted / isKeyboardRestricted used by qhf.l() tap routing.
-     * Hint-only kur.aJ hooks leave these true while driving, so search taps no-op.
-     */
+    private fun kurAjHook() = object : XC_MethodHook() {
+        override fun beforeHookedMethod(param: MethodHookParam) {
+            if (!ModulePrefs.isEnabled()) return
+            if (param.args.size < 5) return
+            debugEntry("kur.aJ() driving=${param.args[1]} keyboardBlocked=${param.args.getOrNull(4)}")
+            if (param.args[1] == true) {
+                debug("kur.aJ() forced driving=false")
+                param.args[1] = false
+            }
+            if (param.args.getOrNull(4) == true) {
+                debug("kur.aJ() forced keyboardBlocked=false")
+                param.args[4] = false
+            }
+        }
+
+        override fun afterHookedMethod(param: MethodHookParam) {
+            if (!ModulePrefs.isEnabled()) return
+            val hint = param.result as? String ?: return
+            val rewritten = VoicePlateHints.rewriteIfVoiceOnly(hint) ?: return
+            ModuleLog.maps(
+                "MAPS-HINT-001",
+                "kur.aJ rewritten \"${hint.take(40)}\" -> \"$rewritten\"",
+                always = true
+            )
+            param.result = rewritten
+        }
+    }
+
+    /** qha carries isMicRestricted / isKeyboardRestricted used by qhf tap routing. */
     private fun hookHeaderUiState(lpparam: XC_LoadPackage.LoadPackageParam) {
         runCatching {
             val qha = findMapsClass(lpparam.classLoader, "qha")
@@ -103,11 +141,11 @@ object MapsHooks {
                     if (!ModulePrefs.isEnabled()) return
                     if (param.args.size < 5) return
                     if (param.args[3] == true) {
-                        log("qha forced isMicRestricted=false")
+                        debug("qha forced isMicRestricted=false")
                         param.args[3] = false
                     }
                     if (param.args[4] == true) {
-                        log("qha forced isKeyboardRestricted=false")
+                        debug("qha forced isKeyboardRestricted=false")
                         param.args[4] = false
                     }
                 }
@@ -116,23 +154,97 @@ object MapsHooks {
         }.onFailure { log("Failed to hook qha: ${it.message}") }
     }
 
-    /** Always open projected keyboard on search-bar tap (rek.d → snp.k → gearhead IME). */
+    /** qwt DistractionState feeds qwv header — force unrestricted for keyboard path. */
+    private fun hookDistractionState(lpparam: XC_LoadPackage.LoadPackageParam) {
+        runCatching {
+            val qwt = findMapsClass(lpparam.classLoader, "qwt")
+            XposedBridge.hookAllConstructors(qwt, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (!ModulePrefs.isEnabled()) return
+                    if (param.args.size < 2) return
+                    if (param.args[0] == true) {
+                        debug("qwt forced isKeyboardRestricted=false")
+                        param.args[0] = false
+                    }
+                    if (param.args[1] == true) {
+                        debug("qwt forced isConfigRestricted=false")
+                        param.args[1] = false
+                    }
+                }
+            })
+            log("Hooked qwt constructors (${qwt.name})")
+        }.onFailure { log("Failed to hook qwt: ${it.message}") }
+    }
+
+    /**
+     * Search bar taps: l() = keyboard/voice router, k() = voice shortcut, i() = mic action.
+     * All redirect to projected keyboard (rek/rel → snp) instead of pub.s() voice dictation.
+     */
     private fun hookSearchBarTap(lpparam: XC_LoadPackage.LoadPackageParam) {
         runCatching {
             val qhf = findMapsClass(lpparam.classLoader, "qhf")
-            val blhx = findMapsClass(lpparam.classLoader, "blhx")
-            val blhxDone = XposedHelpers.getStaticObjectField(blhx, "a")
-            XposedHelpers.findAndHookMethod(qhf, "l", object : XC_MethodHook() {
+            val blhxDone = blhxDone(lpparam)
+            val keyboardTap = object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!ModulePrefs.isEnabled()) return
-                    log(">> qhf.l() search tap — opening projected keyboard")
+                    val method = param.method.name
+                    ModuleLog.maps("MAPS-001", "qhf.$method() — opening projected keyboard", always = true)
                     val rek = XposedHelpers.getObjectField(param.thisObject, "b")
-                    XposedHelpers.callMethod(rek, "d")
+                    openProjectedKeyboard(rek)
                     param.result = blhxDone
                 }
+            }
+            for (method in listOf("l", "k", "i")) {
+                XposedHelpers.findAndHookMethod(qhf, method, keyboardTap)
+            }
+            log("Hooked qhf.l/k/i (${qhf.name})")
+        }.onFailure { log("Failed to hook qhf tap methods: ${it.message}") }
+    }
+
+    /**
+     * Maps-only voice dictation block (gearhead voice assistant hooks stay disabled).
+     * AA search often uses NavAssistantCallbacks gRPC → aoeb.l → voice session, bypassing qhf.
+     */
+    private fun hookMapsVoiceSession(lpparam: XC_LoadPackage.LoadPackageParam) {
+        runCatching {
+            val aoeb = findMapsClass(lpparam.classLoader, "aoeb")
+            XposedHelpers.findAndHookMethod(aoeb, "l", Int::class.javaPrimitiveType, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (!ModulePrefs.isEnabled()) return
+                    val trigger = param.args[0] as Int
+                    ModuleLog.maps("MAPS-001", "aoeb.l($trigger) blocked — opening projected keyboard", always = true)
+                    openFromLastRel()
+                    param.result = null
+                }
             })
-            log("Hooked qhf.l (${qhf.name})")
-        }.onFailure { log("Failed to hook qhf.l: ${it.message}") }
+            log("Hooked aoeb.l (${aoeb.name})")
+        }.onFailure { log("Failed to hook aoeb.l: ${it.message}") }
+
+        runCatching {
+            val aodo = findMapsClass(lpparam.classLoader, "aodo")
+            XposedHelpers.findAndHookMethod(aodo, "m", Int::class.javaPrimitiveType, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (!ModulePrefs.isEnabled()) return
+                    ModuleLog.maps("MAPS-001", "aodo.m(${param.args[0]}) blocked voice session", always = true)
+                    openFromLastRel()
+                    param.result = null
+                }
+            })
+            log("Hooked aodo.m (${aodo.name})")
+        }.onFailure { log("Failed to hook aodo.m: ${it.message}") }
+
+        runCatching {
+            val rzb = findMapsClass(lpparam.classLoader, "rzb")
+            XposedHelpers.findAndHookMethod(rzb, "s", object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (!ModulePrefs.isEnabled()) return
+                    ModuleLog.maps("MAPS-001", "pub.s() via rzb blocked — opening projected keyboard", always = true)
+                    openFromLastRel()
+                    param.result = null
+                }
+            })
+            log("Hooked rzb.s (${rzb.name})")
+        }.onFailure { log("Failed to hook rzb.s: ${it.message}") }
     }
 
     private fun hookProjectedKeyboard(lpparam: XC_LoadPackage.LoadPackageParam) {
@@ -141,7 +253,13 @@ object MapsHooks {
             XposedHelpers.findAndHookMethod(rel, "d", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!ModulePrefs.isEnabled()) return
-                    log(">> rel.d() show keyboard overlay")
+                    lastRel = WeakReference(param.thisObject)
+                    debugEntry("rel.d() show keyboard overlay")
+                }
+
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    if (!ModulePrefs.isEnabled()) return
+                    scheduleShowCarIme(param.thisObject)
                 }
             })
             log("Hooked rel.d (${rel.name})")
@@ -152,13 +270,13 @@ object MapsHooks {
             XposedHelpers.findAndHookMethod(snp, "k", object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!ModulePrefs.isEnabled()) return
-                    log(">> snp.k() show car IME")
+                    debugEntry("snp.k() show car IME")
                 }
             })
             XposedHelpers.findAndHookMethod(snp, "j", findMapsClass(lpparam.classLoader, "bisy"), object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     if (!ModulePrefs.isEnabled()) return
-                    log(">> snp.j() bind car input connection")
+                    debugEntry("snp.j() bind car input connection")
                 }
             })
             log("Hooked snp.j/k (${snp.name})")
@@ -185,6 +303,48 @@ object MapsHooks {
         }
     }
 
+    private fun openProjectedKeyboard(rek: Any) {
+        lastRel = WeakReference(rek)
+        runCatching {
+            XposedHelpers.callMethod(rek, "d")
+        }.onFailure {
+            log("rek.d() failed: ${it.message}")
+            return
+        }
+        scheduleShowCarIme(rek)
+    }
+
+    private fun openFromLastRel() {
+        val rel = lastRel?.get()
+        if (rel == null) {
+            ModuleLog.maps("MAPS-004", "No cached rel overlay for keyboard open", always = true)
+            return
+        }
+        openProjectedKeyboard(rel)
+    }
+
+    /** rel.d() binds car input (snp.j); reh.b() shows projection IME (snp.k). */
+    private fun scheduleShowCarIme(rel: Any) {
+        val showIme = Runnable {
+            runCatching {
+                val reh = XposedHelpers.getObjectField(rel, "c")
+                XposedHelpers.callMethod(reh, "b")
+                debug("reh.b() requested car IME")
+            }.onFailure { log("reh.b() failed: ${it.message}") }
+        }
+        val anchor = runCatching { XposedHelpers.callMethod(rel, "f") as? View }.getOrNull()
+        if (anchor != null) {
+            anchor.post(showIme)
+        } else {
+            showIme.run()
+        }
+    }
+
+    private fun blhxDone(lpparam: XC_LoadPackage.LoadPackageParam): Any {
+        val blhx = findMapsClass(lpparam.classLoader, "blhx")
+        return XposedHelpers.getStaticObjectField(blhx, "a")
+    }
+
     private fun findMapsClass(classLoader: ClassLoader, shortName: String): Class<*> {
         for (name in listOf(shortName, "defpackage.$shortName")) {
             runCatching {
@@ -203,6 +363,6 @@ object MapsHooks {
     }
 
     private fun log(message: String) {
-        XposedBridge.log("[$TAG] $message")
+        ModuleLog.maps("HOOK", message, always = true)
     }
 }

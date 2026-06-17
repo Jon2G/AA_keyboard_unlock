@@ -29,8 +29,11 @@ Sensor type **11** = `SENSOR_DRIVING_STATUS_DATA` (`xnv.SENSOR_DRIVING_STATUS_DA
 |-----|-------------------|
 | **2** | When **set**, keyboard is **locked** (`xdb.c = true`) and parking/keyboard-enable flag `lhl.c` is **false** |
 | **8** | Toggles `lhl.d` (config-allowed / UX restriction path) |
+| Other bits | Additional UX restrictions (e.g. no text, no setup) consumed by Maps and Car App hosts |
 
 AA's own debug flag `ContentBrowse__keyboard_force_disabled` (`acpw.e()`) ORs bit 2 into driving status in `AppDecorService` — confirming bit 2 is the keyboard lock bit.
+
+**Hook behavior (v1.0+):** the module sets the entire driving-status byte to `0x00` (fully unrestricted / parked), not only `&= ~2`. Clearing bit 2 alone left other restriction bits set; Maps treats any restriction as driving and hides the keyboard.
 
 ### Speed sensor (type 2)
 
@@ -90,7 +93,7 @@ This bypasses Car App SearchTemplate hooks. IME unlock requires both `xdl.d` and
 
 | Priority | Class (jadx / runtime) | Method | Action when module enabled |
 |----------|------------------------|--------|---------------------------|
-| **1** | `lhk`, `lhu` | `d(...)` | **beforeHook**: type 2 → `fArr[0]=0`; type 11 → `bArr[0] &= ~2` (concrete `qso` implementors; interface `qso` is not hookable) |
+| **1** | `lhk`, `lhu` | `d(...)` | **beforeHook**: type 2 → `fArr[0]=0`; type 11 → `bArr[0]=0` (full unrestricted byte; concrete `qso` implementors) |
 | **1b** | ~~`qso`~~ | `d(...)` | Interface only — hook concrete classes above |
 | **2** | `lht` | `q()` | **afterHook**: return `true` (keyboard enabled / parked) |
 | **2b** | `lht` | `c()` | **afterHook**: return `lha.b` (CAR_PARKED; unblocks `xcu.h()` external keyboard) |
@@ -111,14 +114,7 @@ This bypasses Car App SearchTemplate hooks. IME unlock requires both `xdl.d` and
 | **10** | `gan` | constructor | **beforeHook**: `voiceOnlyEnabled = false`, `showKeyboardByDefault = true` |
 | **11** | `lgz` | `a(boolean)` | **beforeHook**: force keyboard-enabled notifications to `true` |
 | **12** | `jtg` | constructor | **afterHook**: force `jtg.g` state to `true`, dispatch refresh event 6 |
-| **12** | `VoicePlateWidget` | constructor + `getPlaceholderText()` | **beforeHook/afterHook**: rewrite voice-only placeholder to keyboard hint |
-| **13** | `hjq` | constructor | **beforeHook**: rewrite voice-only `CarText` placeholder to keyboard hint |
-| **14** | `hjv` | constructor | **beforeHook**: force `transcriptionState` INACTIVE; rewrite voice-only text |
-| **15** | `kxe` | `O(qjr)` | Entry log only; allow demand-space transcription UI (type 6) |
-| **15b** | `kxe` | `ac(VoiceSessionConfig)` | **beforeHook**: block voice/dictation types `{1,3,5}` only; allow type `6` |
-| **16** | `kxe` | `aa(MessagingInfo, int)` | Entry log; reply proceeds with mic blocked via `kwt`/`GhMicrophone` |
-| **17** | `kcw` | `k(kvl, int)` | Entry log for Maps voice-search trigger; keyboard opens via Maps `qhf.l` → `snp.k` |
-| **17b** | `kwt` / `GhMicrophoneContentProvider` | `b()` | **beforeHook**: block microphone capture |
+| ~~**12–17**~~ | Voice Plate / assistant (`VoicePlateWidget`, `hjq`, `hjv`, `kxe`, `kwt`, …) | — | **Not installed** — `hookVoicePlateAndAssistant` disabled so the AA voice assistant works normally |
 | **17c** | `xcu` | `h()` | Entry log for external keyboard start |
 
 ### Sensor callback multiplexer (`lhk`)

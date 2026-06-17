@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here.
 
+## [Unreleased]
+
+### Changed
+
+- Driving-status sensor spoof now sets the full byte to `0x00` (was `&= ~2` only), so Maps and other hosts see a fully parked/unrestricted state
+- Disabled `hookVoicePlateAndAssistant` — voice assistant works again; keyboard unlock no longer blocks mic/session hooks
+
 ## [1.0.0] - 2026-06-14
 
 First public release.

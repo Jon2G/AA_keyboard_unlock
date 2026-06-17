@@ -11,9 +11,9 @@ LSPosed module that unlocks the Android Auto on-screen keyboard while driving by
 |----------|-----|
 | External app text fields (WhatsApp reply, messaging, etc.) | Gearhead projection IME (`xcu` → `xdl`/`xdu`) |
 | Google Maps Car search bar | Maps process hooks — label rewrite + keyboard tap routing |
-| Car App SearchTemplate / Voice Plate hints | Gearhead template and placeholder rewriting |
+| Car App SearchTemplate hints | Gearhead `jtg` / template keyboard gates |
 
-Voice dictation is intentionally blocked (`kwt` / `kxe.ac`); the module opens the QWERTY keyboard instead of the mic dictation UI on reply flows.
+The **voice assistant** is left enabled in gearhead (no `hookVoicePlateAndAssistant`). **Google Maps** blocks voice dictation in the Maps process (`aoeb.l`, `pub.s`) and opens the projected keyboard instead — see [maps_hook_targets.md](docs/maps_hook_targets.md).
 
 When the toggle is **off**, all hooks are no-ops — stock Android Auto behavior is unchanged.
 
@@ -58,7 +58,7 @@ The module hooks two scoped packages:
 
 **Android Auto (gearhead)** — sensor spoofing and IME unlock ([hook targets](docs/gearhead_hook_targets.md)):
 
-- Clears the **keyboard lock bit** in driving-status sensor events (type 11)
+- Zeros the **driving-status** byte (type 11) to `0x00` — fully unrestricted/parked, not just keyboard bit 2
 - Zeros **speed** sensor readings (type 2)
 - Forces keyboard-enabled flags in `lht` (LocationManager)
 - Unlocks projection IME when lockout UI would show
