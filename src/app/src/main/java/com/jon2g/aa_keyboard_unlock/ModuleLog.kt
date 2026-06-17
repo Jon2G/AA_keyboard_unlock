@@ -29,7 +29,8 @@ object ModuleLog {
     }
 
     private fun log(process: Process, eventId: String, message: String, always: Boolean) {
-        if (!always && !ModulePrefs.isDebug()) return
+        // Release APKs set MODULE_DEBUG=false — no LSPosed/logcat output (use logging/debug APKs to trace).
+        if (!ModulePrefs.isDebug()) return
         val prefix = when (process) {
             Process.GH -> "GH"
             Process.MAPS -> "MAPS"
