@@ -120,7 +120,7 @@ Validation checklist: [docs/dhu_validation.md](docs/dhu_validation.md)
 | Component | Version |
 |-----------|---------|
 | Android Auto | 17.1.662404-release |
-| Module | 1.0.0 |
+| Module | 2.0.1 |
 | LSPosed API | 82 |
 
 AA updates may change obfuscated class names. If hooks stop working after an AA update, re-run jadx against the new gearhead APK and update [docs/gearhead_hook_targets.md](docs/gearhead_hook_targets.md).

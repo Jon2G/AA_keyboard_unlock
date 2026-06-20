@@ -4,6 +4,22 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-06-19
+
+Bugfix release: phone Google Maps no longer crashes when adding a place to a list while the module is enabled.
+
+### Fixed
+
+- **Phone Maps crash (add-to-list)** — `IllegalStateException` on `GmmComposeView` during RecyclerView layout when behavioral hooks ran on phone `MapsActivity` instead of projected car UI only
+- Behavioral Maps hooks now gated by **`MapsCarContext`**: active only in the `:car` process or while `GhostActivity` is foreground — **not** merely when Android Auto is connected
+- Auxiliary Maps processes (`:primes_lifeboat`, `:server_recovery_process`, etc.) skip hook install entirely
+- Tighter dex signature discovery reduces false-positive hooks (car params, search header taps, keyboard-restricted getters)
+
+### Changed
+
+- `scripts/triage_log.sh` flags behavioral hook lines in the main Maps process without projected UI
+- `docs/DESIGN_GOALS.md` documents the phone Maps safety invariant
+
 ## [2.0.0] - 2026-06-17
 
 Major release: native Maps car keyboard path on Android Auto, with silent production builds.
