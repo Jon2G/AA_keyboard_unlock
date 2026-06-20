@@ -69,10 +69,22 @@ object MapsHooks {
 
     fun install(ctx: HookContext) {
         if (installedForProcess) return
+        MapsCarContext.processName = ctx.processName
+        if (MapsCarContext.isAuxiliaryProcess()) {
+            installedForProcess = true
+            ModuleLog.maps(
+                "MAPS-INSTALL",
+                "skipped auxiliary process ${ctx.processName}",
+                always = true
+            )
+            return
+        }
         installedForProcess = true
         xposed = ctx.xposed
         installHooks(ctx)
     }
+
+    private fun hooksActive(): Boolean = MapsCarContext.shouldApplyBehavioralHooks()
 
     private fun installHooks(ctx: HookContext) {
         storedCtx = ctx
@@ -98,6 +110,7 @@ object MapsHooks {
         hookTurNavSearch(ctx)
         hookDrivingResourceTrace(ctx)
         hookVoiceOnlyPath(ctx)
+        hookProjectedUiLifecycle(ctx)
         hookLazyImeReceiverRegistration(ctx)
         MapsInstallProbe.run(ctx, installAudit, targets)
         ModuleLog.maps("MAPS-INSTALL", "hooks installed for ${ctx.processName}", always = true)
@@ -189,7 +202,7 @@ object MapsHooks {
 
     private fun kurHintHook(methodName: String, params: Array<Class<*>>) = object : MethodHook() {
         override fun beforeHookedMethod(param: HookParam) {
-            if (!ModulePrefs.isEnabled()) return
+            if (!hooksActive()) return
             if (param.args.size < 5) return
             ModuleLog.maps(
                 "MAPS-DRIVE-006",
@@ -215,7 +228,7 @@ object MapsHooks {
         }
 
         override fun afterHookedMethod(param: HookParam) {
-            if (!ModulePrefs.isEnabled()) return
+            if (!hooksActive()) return
             val hint = param.result as? String ?: return
             if (hint.contains("voice only", ignoreCase = true)) {
                 ModuleLog.maps(
@@ -242,7 +255,7 @@ object MapsHooks {
             runCatching {
                 HookChains.hookExecutable(xposed, ctor, object : MethodHook() {
                     override fun beforeHookedMethod(param: HookParam) {
-                        if (!ModulePrefs.isEnabled()) return
+                        if (!hooksActive()) return
                         if (param.args.size >= 5) {
                             if (param.args[3] == true) {
                                 debug("header ctor forced isMicRestricted=false")
@@ -256,7 +269,7 @@ object MapsHooks {
                     }
 
                     override fun afterHookedMethod(param: HookParam) {
-                        if (!ModulePrefs.isEnabled()) return
+                        if (!hooksActive()) return
                         val summary = param.args.mapIndexed { index, value ->
                             "$index:${value?.javaClass?.simpleName}=$value"
                         }.joinToString(" ")
@@ -290,7 +303,7 @@ object MapsHooks {
             runCatching {
                 HookChains.hookExecutable(xposed, ctor, object : MethodHook() {
                     override fun beforeHookedMethod(param: HookParam) {
-                        if (!ModulePrefs.isEnabled()) return
+                        if (!hooksActive()) return
                         if (param.args[0] == true) {
                             debug("distraction ctor forced isKeyboardRestricted=false")
                             param.args[0] = false
@@ -315,14 +328,14 @@ object MapsHooks {
             runCatching {
                 HookChains.hookAllConstructors(xposed, rekType, object : MethodHook() {
                     override fun afterHookedMethod(param: HookParam) {
-                        if (!ModulePrefs.isEnabled()) return
+                        if (!hooksActive()) return
                         lastRek = WeakReference(param.thisObject)
                         debugEntry("${rekType.simpleName} constructed — cached rek")
                     }
                 })
                 val bindHandles = HookChains.hookAllMethods(xposed, rekType, "d", object : MethodHook() {
                     override fun beforeHookedMethod(param: HookParam) {
-                        if (!ModulePrefs.isEnabled()) return
+                        if (!hooksActive()) return
                         lastRek = WeakReference(param.thisObject)
                         debugEntry("${rekType.simpleName}.d() cached rek overlay")
                     }
@@ -344,7 +357,7 @@ object MapsHooks {
             runCatching {
                 HookChains.hookAllConstructors(xposed, headerClass, object : MethodHook() {
                     override fun afterHookedMethod(param: HookParam) {
-                        if (!ModulePrefs.isEnabled()) return
+                        if (!hooksActive()) return
                         val header = param.thisObject ?: return
                         cacheRekFromHeader(header)?.let {
                             ModuleLog.maps(
@@ -369,7 +382,7 @@ object MapsHooks {
             for (methodName in listOf("j", "k")) {
                 val handles = HookChains.hookAllMethods(xposed, snpType, methodName, object : MethodHook() {
                     override fun beforeHookedMethod(param: HookParam) {
-                        if (!ModulePrefs.isEnabled()) return
+                        if (!hooksActive()) return
                         lastSnp = WeakReference(param.thisObject)
                         ModuleLog.maps(
                             "MAPS-003",
@@ -394,7 +407,8 @@ object MapsHooks {
         val classLoader = ctx.classLoader
         val micPassthrough = object : MethodHook() {
             override fun beforeHookedMethod(param: HookParam) {
-                if (!ModulePrefs.isEnabled()) return
+                if (!hooksActive()) return
+                if (!MapsCarContext.isCarProcess() && !MapsCarContext.isProjectedMapsUiActive()) return
                 mapsMicVoiceActive.set(true)
                 ModuleLog.maps("MAPS-MIC-001", "${param.method.declaringClass.simpleName}.${param.method.name}() mic", always = true)
             }
@@ -407,7 +421,8 @@ object MapsHooks {
         for (tap in targets.searchHeaderTaps) {
             val keyboardTap = object : MethodHook() {
                 override fun beforeHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
+                    if (!hooksActive()) return
+                    if (!MapsCarContext.isCarProcess() && !MapsCarContext.isProjectedMapsUiActive()) return
                     val headerClass = param.thisObject?.javaClass?.name ?: "?"
                     ModuleLog.maps("MAPS-DRIVE-006", "$headerClass.${tap.tapMethod.name}() search tap", always = true)
                     val rek = runCatching {
@@ -450,7 +465,7 @@ object MapsHooks {
     private fun hookTrtDrivingFlags(ctx: HookContext) {
         val hook = object : MethodHook() {
             override fun afterHookedMethod(param: HookParam) {
-                if (!ModulePrefs.isEnabled()) return
+                if (!hooksActive()) return
                 if (param.result == true) {
                     ModuleLog.maps(
                         "MAPS-DRIVE-004",
@@ -479,7 +494,7 @@ object MapsHooks {
     private fun hookCarParametersKeyboardFlag(ctx: HookContext) {
         val hook = object : MethodHook() {
             override fun afterHookedMethod(param: HookParam) {
-                if (!ModulePrefs.isEnabled()) return
+                if (!hooksActive()) return
                 val carParams = param.result ?: return
                 if (!MapsSignatureDiscovery.isCarParamsType(carParams.javaClass)) return
                 patchCarParamsFlags(carParams)
@@ -528,7 +543,7 @@ object MapsHooks {
     private fun hookMapsVoiceBypass(ctx: HookContext) {
         val redirect = object : MethodHook() {
             override fun beforeHookedMethod(param: HookParam) {
-                if (!ModulePrefs.isEnabled()) return
+                if (!hooksActive()) return
                 if (mapsMicVoiceActive.get() == true) return
                 val trigger = param.args.getOrNull(0) as? Int
                 ModuleLog.maps(
@@ -560,7 +575,7 @@ object MapsHooks {
     private fun hookTurNavSearch(ctx: HookContext) {
         val trace = object : MethodHook() {
             override fun beforeHookedMethod(param: HookParam) {
-                if (!ModulePrefs.isEnabled()) return
+                if (!hooksActive()) return
                 ModuleLog.maps(
                     "MAPS-DRIVE-006",
                     "${param.thisObject?.javaClass?.simpleName}.s() micActive=${mapsMicVoiceActive.get() == true}",
@@ -594,7 +609,7 @@ object MapsHooks {
     private fun hookDrivingResourceTrace(ctx: HookContext) {
         val traceHook = object : MethodHook() {
             override fun beforeHookedMethod(param: HookParam) {
-                if (!ModulePrefs.isEnabled()) return
+                if (!hooksActive()) return
                 val resId = param.args[0] as? Int ?: return
                 val kind = tracedDrivingResKind(resId) ?: return
                 ModuleLog.maps(
@@ -605,7 +620,7 @@ object MapsHooks {
             }
 
             override fun afterHookedMethod(param: HookParam) {
-                if (!ModulePrefs.isEnabled()) return
+                if (!hooksActive()) return
                 val resId = param.args[0] as? Int ?: return
                 val kind = tracedDrivingResKind(resId) ?: return
                 val text = when (val result = param.result) {
@@ -652,6 +667,43 @@ object MapsHooks {
         }
     }
 
+    private fun hookProjectedUiLifecycle(ctx: HookContext) {
+        runCatching {
+            HookChains.findAndHookMethod(xposed, Activity::class.java, "onResume", object : MethodHook() {
+                override fun afterHookedMethod(param: HookParam) {
+                    val className = (param.thisObject as Activity).javaClass.name
+                    when {
+                        MapsCarContext.isGhostActivityClass(className) -> {
+                            MapsCarContext.onGhostActivityResumed()
+                            if (ModulePrefs.isDebug()) {
+                                ModuleLog.maps(
+                                    "MAPS-CAR-CTX",
+                                    "GhostActivity resumed count=${MapsCarContext.ghostActivityCount}",
+                                    always = true
+                                )
+                            }
+                        }
+                        MapsCarContext.isPhoneMapsActivityClass(className) -> {
+                            MapsCarContext.onPhoneMapsActivityResumed()
+                        }
+                    }
+                }
+            })
+            HookChains.findAndHookMethod(xposed, Activity::class.java, "onPause", object : MethodHook() {
+                override fun afterHookedMethod(param: HookParam) {
+                    val className = (param.thisObject as Activity).javaClass.name
+                    when {
+                        MapsCarContext.isGhostActivityClass(className) ->
+                            MapsCarContext.onGhostActivityPaused()
+                        MapsCarContext.isPhoneMapsActivityClass(className) ->
+                            MapsCarContext.onPhoneMapsActivityPaused()
+                    }
+                }
+            })
+            log("Hooked Activity lifecycle for projected UI gating")
+        }.onFailure { log("Failed to hook Activity lifecycle: ${it.message}") }
+    }
+
     private fun hookLazyImeReceiverRegistration(ctx: HookContext) {
         if (ctx.processName != "com.google.android.apps.maps") return
         runCatching {
@@ -695,7 +747,7 @@ object MapsHooks {
             }
             val receiver = object : BroadcastReceiver() {
                 override fun onReceive(context: Context, intent: Intent) {
-                    if (!ModulePrefs.isEnabled()) return
+                    if (!hooksActive()) return
                     when (intent.action) {
                         MapsNativeIme.ACTION_PREPARE -> {
                             ModuleLog.maps("MAPS-002", "broadcast PREPARE_MAPS_NATIVE_IME", always = true)
@@ -746,6 +798,7 @@ object MapsHooks {
     }
 
     private fun countGhostActivities(): Int {
+        if (MapsCarContext.ghostActivityCount > 0) return MapsCarContext.ghostActivityCount
         return runCatching {
             val atClass = Class.forName("android.app.ActivityThread")
             val thread = Reflect.callStaticMethod(atClass, "currentActivityThread")

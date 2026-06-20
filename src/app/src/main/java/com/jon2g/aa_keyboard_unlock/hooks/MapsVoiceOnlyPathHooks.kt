@@ -48,7 +48,7 @@ object MapsVoiceOnlyPathHooks {
             runCatching {
                 HookChains.hookMethod(xposed, method, object : MethodHook() {
                     override fun beforeHookedMethod(param: HookParam) {
-                        if (!ModulePrefs.isEnabled()) return
+                        if (!MapsCarContext.shouldApplyBehavioralHooks()) return
                         val voiceId = MapsInstallProbe.voiceOnlyResId
                         val keyboardDeniedId = MapsInstallProbe.keyboardDeniedResId
                         if (voiceId == 0 && keyboardDeniedId == 0) return
@@ -87,7 +87,7 @@ object MapsVoiceOnlyPathHooks {
             runCatching {
                 HookChains.hookMethod(xposed, method, object : MethodHook() {
                     override fun beforeHookedMethod(param: HookParam) {
-                        if (!ModulePrefs.isEnabled()) return
+                        if (!MapsCarContext.shouldApplyBehavioralHooks()) return
                         ModuleLog.maps(
                             "MAPS-DRIVE-012",
                             "qjg.t() args=${formatArgs(param.args)}",
@@ -96,7 +96,7 @@ object MapsVoiceOnlyPathHooks {
                     }
 
                     override fun afterHookedMethod(param: HookParam) {
-                        if (!ModulePrefs.isEnabled()) return
+                        if (!MapsCarContext.shouldApplyBehavioralHooks()) return
                         val hint = param.result as? String ?: return
                         if (hint.contains("voice only", ignoreCase = true)) {
                             ModuleLog.maps(
@@ -122,7 +122,7 @@ object MapsVoiceOnlyPathHooks {
             runCatching {
                 HookChains.hookMethod(xposed, method, object : MethodHook() {
                     override fun beforeHookedMethod(param: HookParam) {
-                        if (!ModulePrefs.isEnabled()) return
+                        if (!MapsCarContext.shouldApplyBehavioralHooks()) return
                         ModuleLog.maps(
                             "MAPS-DRIVE-012",
                             "qjh.a() args=${formatArgs(param.args)}",
@@ -131,7 +131,7 @@ object MapsVoiceOnlyPathHooks {
                     }
 
                     override fun afterHookedMethod(param: HookParam) {
-                        if (!ModulePrefs.isEnabled()) return
+                        if (!MapsCarContext.shouldApplyBehavioralHooks()) return
                         val result = param.result ?: return
                         ModuleLog.maps(
                             "MAPS-DRIVE-012",
@@ -164,7 +164,7 @@ object MapsVoiceOnlyPathHooks {
             runCatching {
                 HookChains.hookExecutable(xposed, ctor, object : MethodHook() {
                     override fun beforeHookedMethod(param: HookParam) {
-                        if (!ModulePrefs.isEnabled()) return
+                        if (!MapsCarContext.shouldApplyBehavioralHooks()) return
                         val forced = if (MapsCarUiStatePatches.isCarSearchUiStateConstructor(params)) {
                             MapsCarUiStatePatches.forceCarSearchUiStateConstructorBools(param.args)
                         } else {
@@ -223,7 +223,7 @@ object MapsVoiceOnlyPathHooks {
             runCatching {
                 HookChains.hookExecutable(xposed, ctor, object : MethodHook() {
                     override fun beforeHookedMethod(param: HookParam) {
-                        if (!ModulePrefs.isEnabled()) return
+                        if (!MapsCarContext.shouldApplyBehavioralHooks()) return
                         val uiStatePatched = MapsCarUiStatePatches.patchArgs(param.args)
                         var forced = 0
                         for (index in boolIndices) {

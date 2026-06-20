@@ -127,6 +127,7 @@ AA updates may change obfuscated class names. If hooks stop working after an AA 
 
 ## Troubleshooting
 
+- **Maps crashes on phone when module enabled (e.g. add-to-list):** Behavioral hooks must not run on phone `MapsActivity` — only on projected car UI (`GhostActivity` / `:car` process), even if AA stays connected. Install a build with `MapsCarContext` gating, force-stop Maps, and verify with module off/on bisection. `./scripts/triage_log.sh logs/log/modules_*.log` should **not** show `MAPS-MIC-001` / `MAPS-DRIVE-006` in `(com.google.android.apps.maps)` without `MAPS-CAR-CTX`.
 - **Keyboard still locked after install:** Force-stop Android Auto, verify both packages are scoped in LSPosed, and confirm the module toggle is on.
 - **Maps search shows voice-only label or tap does nothing:** Ensure Google Maps is scoped (not just Android Auto).
 - **Gearhead UI crashes when opening keyboard:** Do not force all `npz.d/e/f` hooks to false — see [gearhead hook docs](docs/gearhead_hook_targets.md). v1.0.0 uses `jpm` hooks and an `xdm.e()` fallback instead.

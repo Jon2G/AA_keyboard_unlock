@@ -38,11 +38,18 @@ grep -E 'xcu\.h|xdl\.d|xdb\.onStart|forced c=false|gxy\.d\(\)|lgz\.a\(\) forced 
 section "Maps driving instrumentation (logging build required)"
 grep -E 'MAPS-DRIVE-00[0-9]|MAPS-DRIVE-01[01]|MAPS-DRIVE-020' "$LOG" | tail -25 || echo "(none — install logging APK and reopen Maps)"
 
-drive_audit=$(grep -c 'MAPS-DRIVE-003' "$LOG" 2>/dev/null || echo 0)
-drive_voice=$(grep -c 'MAPS-DRIVE-008.*voiceOnly\|MAPS-DRIVE-001.*voice-only' "$LOG" 2>/dev/null || echo 0)
-drive_search=$(grep -c 'MAPS-DRIVE-009\|MAPS-DRIVE-008.*searchHint' "$LOG" 2>/dev/null || echo 0)
-drive_qha=$(grep -c 'MAPS-DRIVE-005.*qha constructed' "$LOG" 2>/dev/null || echo 0)
-drive_fields=$(grep -c 'MAPS-DRIVE-007' "$LOG" 2>/dev/null || echo 0)
+count_in_log() {
+  local pattern="$1"
+  local n
+  n=$(grep -c "$pattern" "$LOG" 2>/dev/null || true)
+  echo "${n:-0}"
+}
+
+drive_audit=$(count_in_log 'MAPS-DRIVE-003')
+drive_voice=$(count_in_log 'MAPS-DRIVE-008.*voiceOnly\|MAPS-DRIVE-001.*voice-only')
+drive_search=$(count_in_log 'MAPS-DRIVE-009\|MAPS-DRIVE-008.*searchHint')
+drive_qha=$(count_in_log 'MAPS-DRIVE-005.*qha constructed')
+drive_fields=$(count_in_log 'MAPS-DRIVE-007')
 
 section "Pass/fail summary"
 
@@ -96,6 +103,32 @@ fi
 if grep -qE 'GH-MAPS-00|kcw\.k\(10\)|GH-KBD-00|MAPS-HINT-001|GH-HINT-001' "$LOG"; then
   echo "WARN: legacy Maps keyboard/overlay/hint lines present — expect none after driving-trace pivot"
   warn=$((warn + 1))
+fi
+
+section "Phone vs car hook activity"
+ghost_ctx=$(count_in_log 'MAPS-CAR-CTX.*GhostActivity resumed')
+main_behavioral=$(
+  grep -E '\(com\.google\.android\.apps\.maps\)\[.*\[(MAPS-DRIVE-006|MAPS-001|MAPS-MIC-001)\]' "$LOG" 2>/dev/null || true
+)
+
+if [[ -n "$main_behavioral" ]]; then
+  if [[ "$ghost_ctx" -eq 0 ]]; then
+    echo "FAIL: behavioral Maps hooks in main process without GhostActivity — phone UI may be hooked"
+    echo "$main_behavioral" | tail -3
+    fail=$((fail + 1))
+  else
+    echo "PASS: main-process behavioral hooks only while GhostActivity tracked"
+    pass=$((pass + 1))
+  fi
+fi
+
+if grep -q 'skipped auxiliary process' "$LOG"; then
+  echo "PASS: auxiliary Maps processes skipped at install"
+  pass=$((pass + 1))
+fi
+
+if grep -q 'MAPS-CAR-CTX' "$LOG"; then
+  echo "INFO: projected UI lifecycle tracking present (MAPS-CAR-CTX)"
 fi
 
 echo ""

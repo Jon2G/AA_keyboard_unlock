@@ -164,6 +164,8 @@ object MapsSignatureDiscovery {
         allRek += rekTypes
         allRek += rekLooseTypes
 
+        val carGraph = buildCarGraphClasses(headerTaps, allRek, carImeTypes)
+
         logScanStats(stats, entrySamples)
 
         return DiscoveredTargets(
@@ -173,14 +175,17 @@ object MapsSignatureDiscovery {
                 .take(16),
             rekOverlayTypes = allRek.sortedByDescending { scoreRekType(it) }.take(20),
             carImeTypes = carImeTypes.sortedBy { it.name }.take(10),
-            searchHeaderTaps = headerTaps.sortedBy { it.headerClass.name }.take(16),
+            searchHeaderTaps = headerTaps
+                .sortedByDescending { scoreSearchHeaderTap(it) }
+                .take(4),
             carParameterMethods = carParamMethods
                 .distinctBy { "${it.declaringClass.name}#${it.name}" }
                 .sortedByDescending { scoreCarParamsMethod(it) }
                 .take(16),
-            keyboardRestrictedMethods = restrictedMethods
-                .sortedByDescending { scoreRestrictedMethod(it) }
-                .take(32),
+            keyboardRestrictedMethods = filterCarGraphRestrictedMethods(
+                restrictedMethods.sortedByDescending { scoreRestrictedMethod(it) },
+                carGraph,
+            ).take(32),
             voiceBypassMethods = voiceMethods
                 .sortedByDescending { scoreVoiceBypassMethod(it) }
                 .take(12),
@@ -439,14 +444,20 @@ object MapsSignatureDiscovery {
     fun isCarImeControllerType(clazz: Class<*>): Boolean = isCarImeControllerTypeLoose(clazz)
 
     fun isCarParamsType(type: Class<*>): Boolean {
+        val name = type.name
+        if (name.startsWith("android.") || name.startsWith("androidx.") ||
+            name.startsWith("java.") || name.startsWith("kotlin.")
+        ) {
+            return false
+        }
         if (type.isPrimitive || type == String::class.java) return false
         val boolFields = type.declaredFields.filter {
             !Modifier.isStatic(it.modifiers) &&
                 (it.type == Boolean::class.javaPrimitiveType || it.type == Boolean::class.java)
         }
         if (boolFields.isEmpty()) return false
-        if (boolFields.any { it.name == "A" || it.name == "c" }) return true
-        return boolFields.size >= 2
+        val fieldNames = boolFields.map { it.name }.toSet()
+        return "A" in fieldNames && "c" in fieldNames
     }
 
     fun findSearchHeaderTap(clazz: Class<*>): SearchHeaderTap? {
@@ -459,7 +470,7 @@ object MapsSignatureDiscovery {
         } ?: return null
 
         val rekField = clazz.declaredFields.firstOrNull { field ->
-            !Modifier.isStatic(field.modifiers) && isRekFieldType(field.type)
+            !Modifier.isStatic(field.modifiers) && isRekOverlayTypeStrict(field.type)
         } ?: return null
 
         return SearchHeaderTap(clazz, tapMethod, rekField.name)
@@ -502,7 +513,51 @@ object MapsSignatureDiscovery {
         if (method.name != "i" && method.name != "b") return false
         if (clazz.declaredMethods.size > 60) return false
         val simple = clazz.simpleName
-        return simple.length in 3..4 && simple.all { it in 'a'..'z' }
+        if (simple.length !in 3..4 || !simple.all { it in 'a'..'z' }) return false
+        if (clazz.name.startsWith("android.") || clazz.name.startsWith("androidx.")) return false
+        return true
+    }
+
+    private fun buildCarGraphClasses(
+        headerTaps: Collection<SearchHeaderTap>,
+        rekTypes: Collection<Class<*>>,
+        carImeTypes: Collection<Class<*>>,
+    ): Set<Class<*>> {
+        val graph = linkedSetOf<Class<*>>()
+        headerTaps.mapTo(graph) { it.headerClass }
+        graph += rekTypes
+        graph += carImeTypes
+        var grown = true
+        while (grown) {
+            grown = false
+            for (clazz in graph.toList()) {
+                for (field in clazz.declaredFields) {
+                    if (Modifier.isStatic(field.modifiers)) continue
+                    val fieldType = field.type
+                    if (!isObfuscatedShortName(fieldType.simpleName)) continue
+                    if (graph.add(fieldType)) grown = true
+                }
+            }
+        }
+        return graph
+    }
+
+    private fun filterCarGraphRestrictedMethods(
+        methods: Collection<Method>,
+        carGraph: Set<Class<*>>,
+    ): List<Method> {
+        return methods.filter { method ->
+            val clazz = method.declaringClass
+            carGraph.contains(clazz) || clazz.simpleName.startsWith("tr")
+        }
+    }
+
+    private fun scoreSearchHeaderTap(tap: SearchHeaderTap): Int {
+        var score = 0
+        val rekType = tap.headerClass.declaredFields.firstOrNull { it.name == tap.rekFieldName }?.type
+        if (rekType != null && isRekOverlayTypeStrict(rekType)) score += 10
+        if (tap.headerClass.declaredFields.any { isRekOverlayTypeStrict(it.type) }) score += 5
+        return score
     }
 
     private fun isVoiceBypassMethod(method: Method, clazz: Class<*>): Boolean {

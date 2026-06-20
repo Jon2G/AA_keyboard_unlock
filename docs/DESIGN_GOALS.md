@@ -1,5 +1,18 @@
 # Design goals — AA Keyboard Unlock
 
+## Phone Maps safety (invariant)
+
+**Phone Maps (`MapsActivity`) must behave identically to stock — whether or not Android Auto / gearhead is connected.**
+
+Behavioral hooks in the Maps process apply only when projected car UI is active:
+
+- **`GhostActivity` is foreground** in the main Maps process (`MapsCarContext.ghostActivityCount > 0`), or
+- The hook runs in the **`:car`** process.
+
+Hooks must **not** run on phone UI (`MapsActivity`, lists, place details, add-to-list) even when AA remains connected in the background. Gating on gearhead connection alone is insufficient.
+
+Implementation: [`MapsCarContext.kt`](../src/app/src/main/java/com/jon2g/aa_keyboard_unlock/hooks/MapsCarContext.kt) — `shouldApplyBehavioralHooks()`.
+
 ## Primary goal: hook driving detection
 
 The module must **defeat in-process driving / distraction detection** so Google Maps and Android Auto choose the **stock keyboard path** on their own.
