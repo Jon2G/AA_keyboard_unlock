@@ -156,6 +156,7 @@ jobs:
           body_path: release_body.md
 
       - name: Publish to Xposed-Modules-Repo
+        working-directory: .
         env:
           GH_TOKEN: ${{ secrets.XPOSED_REPO_TOKEN }}
         if: env.GH_TOKEN != ''
@@ -163,6 +164,11 @@ jobs:
           TAG="${{ steps.version.outputs.version_code }}-${{ steps.version.outputs.version_name }}"
           APK="${{ steps.version.outputs.apk_name }}"
           REPO="Xposed-Modules-Repo/com.jon2g.aa_keyboard_unlock"
+          if [ ! -f "$APK" ]; then
+            echo "APK not found at $(pwd)/$APK"
+            ls -la
+            exit 1
+          fi
           if gh release view "$TAG" --repo "$REPO" > /dev/null 2>&1; then
             gh release upload "$TAG" "$APK" --repo "$REPO" --clobber
           else
