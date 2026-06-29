@@ -45,6 +45,8 @@ When the toggle is **off**, all hooks are no-ops — stock Android Auto behavior
 
 4. Open **AA Keyboard Unlock** → enable **Unlock keyboard while active**
 
+   The settings screen checks [GitHub Releases](https://github.com/Jon2G/AA_keyboard_unlock/releases) for updates when opened. Tap **Check for updates** anytime, or install from the prompt when a newer release is available. You may need to allow **Install unknown apps** for this package. LSPosed Manager / Xposed-Modules-Repo updates still work alongside in-app updates.
+
 5. Force-stop Android Auto and reconnect to your head unit or DHU
 
 ## Build from source

@@ -8,6 +8,28 @@
     <string name="debug_build_off">Verbose logging: OFF (release build — install the -log APK for traces)</string>
     <string name="scope_hint">Enable this module for Android Auto and Google Maps (all processes, including :car) in LSPosed Manager.</string>
     <string name="scope_package">Scope: com.google.android.projection.gearhead, com.google.android.apps.maps</string>
+    <string name="about_section">About</string>
+    <string name="app_version_label">%1$s v%2$s</string>
+    <string name="created_by">Created by %1$s</string>
+    <string name="view_source_github">View source on GitHub</string>
+    <string name="mit_license">MIT License</string>
+    <string name="creator_name">Jonathan Eduardo García García</string>
+    <string name="repo_url">https://github.com/Jon2G/AA_keyboard_unlock</string>
+    <string name="check_for_updates">Check for updates</string>
+    <string name="update_checking">Checking for updates…</string>
+    <string name="update_up_to_date">You\'re on the latest version.</string>
+    <string name="update_check_failed">Could not check for updates. Try again later.</string>
+    <string name="update_available_title">Update available</string>
+    <string name="update_version_label">v%1$s</string>
+    <string name="update_no_changelog">No release notes for this version.</string>
+    <string name="update_lsposed_hint">After installing, reopen LSPosed Manager if the module version does not refresh.</string>
+    <string name="update_install">Install</string>
+    <string name="update_later">Later</string>
+    <string name="update_open_github">Open on GitHub</string>
+    <string name="update_downloading">Downloading update…</string>
+    <string name="update_download_failed">Download failed. Open the release on GitHub instead.</string>
+    <string name="update_install_failed">Could not start the installer. Open the release on GitHub instead.</string>
+    <string name="update_install_permission">Allow installs from this app in Settings, then tap Install again.</string>
     <string-array name="xposed_scope">
         <item>com.google.android.projection.gearhead</item>
         <item>com.google.android.apps.maps</item>

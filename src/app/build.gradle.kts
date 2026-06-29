@@ -73,5 +73,7 @@ android {
 dependencies {
     compileOnly("io.github.libxposed:api:102.0.0")
     implementation("androidx.appcompat:appcompat:1.7.0")
+    implementation("androidx.fragment:fragment-ktx:1.8.5")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("com.google.android.material:material:1.12.0")
 }

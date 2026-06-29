@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- In-app updates from GitHub Releases — auto-check when opening settings, manual **Check for updates**, download and install via system package installer
+- About section on settings screen — app version, author, GitHub link, MIT license
+
 ## [2.0.1] - 2026-06-19
 
 Bugfix release: phone Google Maps no longer crashes when adding a place to a list while the module is enabled.
