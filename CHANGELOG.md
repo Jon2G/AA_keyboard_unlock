@@ -11,26 +11,31 @@ All notable changes to this project are documented here.
 
 ## [2.1.0] - 2026-07-24
 
-Android Auto **17.3** + Maps **26.30** keyboard unlock: signature/anchor discovery, no hard-coded remaps as the source of truth.
+Android Auto **17.3** + Maps **26.30** keyboard unlock: signature/anchor discovery is the source of truth; short names are probes only and rejected unless API shape matches.
 
 ### Added
 
-- **`DiscoveryCache`** — versioned persistence of resolved Gearhead/Maps hook descriptors keyed by `package@longVersionCode` (schema v2)
+- **`DiscoveryCache`** — versioned persistence of resolved Gearhead/Maps hook descriptors keyed by `package@longVersionCode` (schema v5)
 - **`GearheadSignatureDiscovery`** — FQCN + shape anchors (`TouchInputMethodService`, `VoiceSessionConfig`, `DemandClientService`, `CAR_PARKED`) with short-name **seeds** validated by API shape; skips full dex walk when anchors complete
-- Maps search tap / voice-only path hooks driven by **discovered signatures** (`hintMethods`, `searchHeaderTaps`, UiState ctor shape, `isMicRestricted=` toString) — not fixed R8 class names
+- **`MapsSignatureDiscovery`** — multidex ClassLoader scan, string anchors (`isMicRestricted=`), UiState ctor shape, header-tap scoring that prefers controllers holding car-search UiState; shape-validated fallbacks only when scan leaves a gap
+- **`MapsCarUiStatePatches`** — clear mic/keyboard restrictions via UiState toString/ctor rebuild (no field-letter hardcoding)
+- Maps voice-only path hooks consume **discovered targets only** (no short names in the hook layer)
 
 ### Fixed
 
 - Android Auto **17.3** `ClassNotFound` on legacy short names (`xdl`/`kcw`/`kxe`/…) — discovery replaces permanent remaps
 - Discovery false positives (`aemn`/`ajjr`) and hung full-dex scan after anchors — anchor-first + early complete
-- Maps drive-mode search bar **no-op** when mic+keyboard restricted (`qnu.l`-shaped path) — open rek keyboard via discovered header taps; clear UiState restrictions via toString/ctor rebuild
-- Maps **"Can't use keyboard while driving"** / voice-only label — resource + hint-gate rewrite; UiState mic/keyboard flags cleared without field-letter hardcoding
+- Maps dex scan missing car-search types in secondary dexes — enumerate ClassLoader `dexElements` (not `DexFile(apk)` primary dex only)
+- Maps drive-mode search opening **voice dictation** instead of QWERTY — force rek keyboard open on shape-validated header taps; clear UiState restrictions; driving hint-gate bool forced false
+- Maps **"Can't use keyboard while driving"** / voice-only label — resource + hint-gate rewrite
 - External AA apps **"Park to use the keyboard"** — parking/location/IME hooks install again after discovery completes
+- Voice-only install aborting on missing XR classes (`NoClassDefFoundError`) — per-step isolation so one bad type cannot skip keyboard hooks
 
 ### Changed
 
 - Release path stays **silent** (`MODULE_DEBUG=false`); use `-log` / debug APK for LSPosed traces
-- Gearhead short names remain **seed/fallback only**; runtime hooks prefer cached descriptors and FQCN anchors
+- Gearhead/Maps short names remain **seed/fallback only**; runtime hooks prefer cached descriptors, FQCN anchors, and shape matches
+- Unit/`done` return values resolved from the hooked method's return type (singleton static field), not a fixed class name
 
 ## [2.0.1] - 2026-06-19
 

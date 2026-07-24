@@ -10,7 +10,7 @@ import java.util.zip.ZipFile
 object DexHooks {
     /**
      * Scan APK dex blobs for string constants (class name -> matched needle).
-     * Best-effort: reads raw dex bytes inside the APK zip.
+     * Searches raw dex bytes (Latin-1) so ASCII needles survive binary noise.
      */
     fun findClassesReferencingStrings(
         apkPath: String,
@@ -27,7 +27,8 @@ object DexHooks {
                     .toList()
                 for (dexName in dexNames) {
                     val bytes = zip.getInputStream(zip.getEntry(dexName)).readBytes()
-                    val text = bytes.decodeToString()
+                    // Latin-1 keeps a 1:1 byte↔char map so ASCII needles match in binary dex.
+                    val text = bytes.toString(Charsets.ISO_8859_1)
                     for (needle in needles) {
                         var from = 0
                         while (hits.size < limit) {

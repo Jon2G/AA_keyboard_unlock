@@ -15,17 +15,11 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * Voice-only / keyboard-denied path hooks.
  *
- * Discovery supplies candidates when shapes match. For Maps car-search we also try
- * **shape-validated seeds** (same approach as gearhead anchors): short names are only
- * used after confirming API shape (UiState toString / rek.d / Context+bool hint gate).
+ * All targets come from [MapsSignatureDiscovery] (dex/string scan + shape-validated
+ * fallbacks). This file never resolves obfuscated short names itself.
  */
 object MapsVoiceOnlyPathHooks {
     private val hookedKeys = ConcurrentHashMap.newKeySet<String>()
-
-    /** Seeds validated by shape before hooking — not pinned as the sole resolution path. */
-    private val HINT_SEEDS = listOf("onl")
-    private val HEADER_SEEDS = listOf("qnu")
-    private val UISTATE_SEEDS = listOf("qnp")
 
     fun install(
         xposed: XposedInterface,
@@ -33,23 +27,6 @@ object MapsVoiceOnlyPathHooks {
         targets: MapsSignatureDiscovery.DiscoveredTargets,
     ): Int {
         var hooked = 0
-        // Proven car-search path first (seeds validated by shape).
-        hooked += runCatching { hookSeedHintGates(xposed, classLoader) }.getOrElse {
-            ModuleLog.maps("MAPS-DRIVE-012", "seed hint failed: ${it.message}", always = true)
-            0
-        }
-        hooked += runCatching { hookSeedSearchHeaderKeyboard(xposed, classLoader) }.getOrElse {
-            ModuleLog.maps("MAPS-DRIVE-012", "seed header failed: ${it.message}", always = true)
-            0
-        }
-        hooked += runCatching { hookSeedUiStateUpdate(xposed, classLoader) }.getOrElse {
-            ModuleLog.maps("MAPS-DRIVE-012", "seed UiState update failed: ${it.message}", always = true)
-            0
-        }
-        hooked += runCatching { hookSeedUiStateTypes(xposed, classLoader) }.getOrElse {
-            ModuleLog.maps("MAPS-DRIVE-012", "seed UiState types failed: ${it.message}", always = true)
-            0
-        }
         hooked += runCatching {
             hookDrivingHintGates(xposed, targets.hintMethods)
         }.getOrElse {
@@ -60,6 +37,12 @@ object MapsVoiceOnlyPathHooks {
             hookUiStateConstructors(xposed, targets.headerRestrictionConstructors)
         }.getOrElse {
             ModuleLog.maps("MAPS-DRIVE-012", "UiState ctors failed: ${it.message}", always = true)
+            0
+        }
+        hooked += runCatching {
+            hookSearchHeaderConstructors(xposed, targets.searchHeaderTaps)
+        }.getOrElse {
+            ModuleLog.maps("MAPS-DRIVE-012", "header ctors failed: ${it.message}", always = true)
             0
         }
         hooked += runCatching {
@@ -92,107 +75,16 @@ object MapsVoiceOnlyPathHooks {
         return hooked
     }
 
-    private fun loadClass(classLoader: ClassLoader, shortName: String): Class<*>? =
-        Reflect.findClassIfExists(shortName, classLoader)
-
-    /** onl.bj-shaped: static String(Context, bool, …) — force driving bool false. */
-    private fun hookSeedHintGates(xposed: XposedInterface, classLoader: ClassLoader): Int {
+    /** Force restriction bools / UiState args on discovered search-header controllers. */
+    private fun hookSearchHeaderConstructors(
+        xposed: XposedInterface,
+        taps: List<MapsSignatureDiscovery.SearchHeaderTap>,
+    ): Int {
         var hooked = 0
-        val booleanPrimitive = Boolean::class.javaPrimitiveType!!
-        for (seed in HINT_SEEDS) {
-            val clazz = loadClass(classLoader, seed) ?: continue
-            for (method in clazz.declaredMethods) {
-                if (!Modifier.isStatic(method.modifiers)) continue
-                if (method.returnType != String::class.java) continue
-                if (method.parameterCount < 2) continue
-                if (method.parameterTypes[0].name != Context::class.java.name) continue
-                val boolCount = method.parameterTypes.count {
-                    it == booleanPrimitive || it == Boolean::class.java
-                }
-                if (boolCount < 2) continue
-                if (!hookOnce("${clazz.name}#${method.name}#seedHint")) continue
-                runCatching {
-                    HookChains.hookMethod(xposed, method, object : MethodHook() {
-                        override fun beforeHookedMethod(param: HookParam) {
-                            if (!MapsCarContext.shouldApplyBehavioralHooks()) return
-                            // First bool after Context drives voice-only / keyboard-denied branch.
-                            if (param.args.size > 1 &&
-                                (method.parameterTypes[1] == booleanPrimitive ||
-                                    method.parameterTypes[1] == Boolean::class.java) &&
-                                param.args[1] == true
-                            ) {
-                                param.args[1] = false
-                                ModuleLog.maps(
-                                    "MAPS-DRIVE-012",
-                                    "${clazz.simpleName}.${method.name}() forced driving hint flag false",
-                                    always = true
-                                )
-                            }
-                        }
-                    })
-                    hooked++
-                    ModuleLog.maps(
-                        "MAPS-DRIVE-012",
-                        "hooked ${clazz.simpleName}.${method.name} driving hint gate (seed+shape)",
-                        always = true
-                    )
-                }
-            }
-        }
-        return hooked
-    }
-
-    /**
-     * qnu.l-shaped: zero-arg tap on controller with rek-like field → always open keyboard
-     * and skip the mic / no-op branches.
-     */
-    private fun hookSeedSearchHeaderKeyboard(xposed: XposedInterface, classLoader: ClassLoader): Int {
-        var hooked = 0
-        val doneResult = runCatching {
-            Reflect.getStaticObjectField(Reflect.findClass("blzo", classLoader), "a")
-        }.getOrNull()
-        for (seed in HEADER_SEEDS) {
-            val clazz = loadClass(classLoader, seed) ?: continue
-            if (!isValidatedSearchHeader(clazz)) {
-                ModuleLog.maps(
-                    "MAPS-DRIVE-012",
-                    "seed $seed failed shape check (not search header)",
-                    always = true
-                )
-                continue
-            }
-            val tap = MapsSignatureDiscovery.findSearchHeaderTap(clazz) ?: continue
-            if (!hookOnce("${clazz.name}#${tap.tapMethod.name}#seedTap")) continue
-            runCatching {
-                HookChains.hookMethod(xposed, tap.tapMethod, object : MethodHook() {
-                    override fun beforeHookedMethod(param: HookParam) {
-                        if (!MapsCarContext.shouldApplyBehavioralHooks()) return
-                        val self = param.thisObject ?: return
-                        val rek = runCatching {
-                            Reflect.getObjectField(self, tap.rekFieldName)
-                        }.getOrNull() ?: MapsSignatureDiscovery.findRekFieldOnHeader(self)?.second
-                        if (rek == null) return
-                        Reflect.callMethod(rek, "d")
-                        ModuleLog.maps(
-                            "MAPS-DRIVE-012",
-                            "${clazz.simpleName}.${tap.tapMethod.name}() forced rek.d() native keyboard open",
-                            always = true
-                        )
-                        if (doneResult != null && tap.tapMethod.returnType.isInstance(doneResult)) {
-                            param.result = doneResult
-                        }
-                    }
-                })
-                hooked++
-                ModuleLog.maps(
-                    "MAPS-DRIVE-012",
-                    "hooked ${clazz.simpleName}.${tap.tapMethod.name}() search tap → keyboard (seed+shape)",
-                    always = true
-                )
-            }
-            // Also force restriction bools false on header constructors that take UiState.
-            for (ctor in clazz.declaredConstructors) {
-                if (!hookOnce("${clazz.name}#<init>#${ctor.parameterCount}#seedHdr")) continue
+        for (tap in taps) {
+            for (ctor in tap.headerClass.declaredConstructors) {
+                if (ctor.parameterCount < 2) continue
+                if (!hookOnce("${tap.headerClass.name}#<init>#${ctor.parameterCount}#hdr")) continue
                 runCatching {
                     HookChains.hookExecutable(xposed, ctor, object : MethodHook() {
                         override fun beforeHookedMethod(param: HookParam) {
@@ -202,132 +94,14 @@ object MapsVoiceOnlyPathHooks {
                             if (patched > 0 || forced > 0) {
                                 ModuleLog.maps(
                                     "MAPS-DRIVE-012",
-                                    "${clazz.simpleName}.<init> forced $forced restriction bool(s) " +
-                                        "false uiStatePatched=$patched",
+                                    "${tap.headerClass.simpleName}.<init> forced $forced " +
+                                        "restriction bool(s) false uiStatePatched=$patched",
                                     always = true
                                 )
                             }
                         }
                     })
                     hooked++
-                }
-            }
-        }
-        return hooked
-    }
-
-    private fun isValidatedSearchHeader(clazz: Class<*>): Boolean {
-        val tap = MapsSignatureDiscovery.findSearchHeaderTap(clazz) ?: return false
-        // Must expose UiState-like accessor or ctor/param/field (qnu.u() → qnp).
-        val hasUiStateApi =
-            clazz.declaredMethods.any { method ->
-                method.parameterCount == 0 &&
-                    !Modifier.isStatic(method.modifiers) &&
-                    looksLikeUiStateType(method.returnType)
-            } || clazz.declaredConstructors.any { ctor ->
-                ctor.parameterTypes.any { looksLikeUiStateType(it) }
-            } || clazz.declaredFields.any { field ->
-                !Modifier.isStatic(field.modifiers) && looksLikeUiStateType(field.type)
-            }
-        if (!hasUiStateApi) return false
-        val rekType = clazz.declaredFields.firstOrNull { it.name == tap.rekFieldName }?.type
-        return rekType != null && MapsSignatureDiscovery.isRekFieldType(rekType)
-    }
-
-    private fun looksLikeUiStateType(type: Class<*>): Boolean {
-        if (type.isPrimitive || type == String::class.java) return false
-        return type.declaredConstructors.any {
-            MapsCarUiStatePatches.isCarSearchUiStateConstructor(it.parameterTypes)
-        }
-    }
-
-    /** qnu.t-shaped static UiState rebuilder — clear restriction bools + result. */
-    private fun hookSeedUiStateUpdate(xposed: XposedInterface, classLoader: ClassLoader): Int {
-        var hooked = 0
-        val booleanPrimitive = Boolean::class.javaPrimitiveType!!
-        for (seed in HEADER_SEEDS) {
-            val clazz = loadClass(classLoader, seed) ?: continue
-            for (method in clazz.declaredMethods) {
-                if (!Modifier.isStatic(method.modifiers)) continue
-                if (method.parameterCount < 2) continue
-                if (!looksLikeUiStateType(method.returnType)) continue
-                if (!hookOnce("${clazz.name}#${method.name}#seedRebuild")) continue
-                runCatching {
-                    HookChains.hookMethod(xposed, method, object : MethodHook() {
-                        override fun beforeHookedMethod(param: HookParam) {
-                            if (!MapsCarContext.shouldApplyBehavioralHooks()) return
-                            MapsCarUiStatePatches.patchArgs(param.args)
-                            for (index in method.parameterTypes.indices) {
-                                val type = method.parameterTypes[index]
-                                if (type != booleanPrimitive && type != Boolean::class.java) continue
-                                if (param.args.getOrNull(index) == true) {
-                                    param.args[index] = false
-                                }
-                            }
-                        }
-
-                        override fun afterHookedMethod(param: HookParam) {
-                            if (!MapsCarContext.shouldApplyBehavioralHooks()) return
-                            val result = param.result ?: return
-                            val cleared = MapsCarUiStatePatches.clearRestrictions(result) ?: return
-                            if (cleared !== result) {
-                                param.result = cleared
-                                ModuleLog.maps(
-                                    "MAPS-DRIVE-012",
-                                    "${clazz.simpleName}.${method.name}() UiState restrictions cleared",
-                                    always = true
-                                )
-                            }
-                        }
-                    })
-                    hooked++
-                    ModuleLog.maps(
-                        "MAPS-DRIVE-012",
-                        "hooked ${clazz.simpleName}.${method.name}() UiState update (seed+shape)",
-                        always = true
-                    )
-                }
-            }
-        }
-        return hooked
-    }
-
-    private fun hookSeedUiStateTypes(xposed: XposedInterface, classLoader: ClassLoader): Int {
-        var hooked = 0
-        for (seed in UISTATE_SEEDS) {
-            val clazz = loadClass(classLoader, seed) ?: continue
-            if (!looksLikeUiStateType(clazz)) {
-                ModuleLog.maps(
-                    "MAPS-DRIVE-012",
-                    "seed $seed failed UiState shape check",
-                    always = true
-                )
-                continue
-            }
-            for (ctor in clazz.declaredConstructors) {
-                if (!MapsCarUiStatePatches.isCarSearchUiStateConstructor(ctor.parameterTypes)) continue
-                if (!hookOnce("${clazz.name}#<init>#uiSeed#${ctor.parameterCount}")) continue
-                runCatching {
-                    HookChains.hookExecutable(xposed, ctor, object : MethodHook() {
-                        override fun beforeHookedMethod(param: HookParam) {
-                            if (!MapsCarContext.shouldApplyBehavioralHooks()) return
-                            val forced =
-                                MapsCarUiStatePatches.forceCarSearchUiStateConstructorBools(param.args)
-                            if (forced > 0) {
-                                ModuleLog.maps(
-                                    "MAPS-DRIVE-012",
-                                    "${clazz.simpleName}.<init> forced $forced restriction bool(s) false",
-                                    always = true
-                                )
-                            }
-                        }
-                    })
-                    hooked++
-                    ModuleLog.maps(
-                        "MAPS-DRIVE-012",
-                        "hooked ${clazz.simpleName} UiState ctor (seed+shape)",
-                        always = true
-                    )
                 }
             }
         }
@@ -623,13 +397,29 @@ object MapsVoiceOnlyPathHooks {
         taps: List<MapsSignatureDiscovery.SearchHeaderTap>,
     ): Int {
         var hooked = 0
-        for (tap in taps) {
+        val preferred = if (taps.size > 1) {
+            // Prefer controllers that expose UiState (car search); avoid false-positive l()+rek.
+            taps.filter { tap ->
+                tap.headerClass.declaredMethods.any { method ->
+                    method.parameterCount == 0 &&
+                        !Modifier.isStatic(method.modifiers) &&
+                        method.returnType.declaredConstructors.any {
+                            MapsCarUiStatePatches.isCarSearchUiStateConstructor(it.parameterTypes)
+                        }
+                } || tap.headerClass.declaredConstructors.any { ctor ->
+                    ctor.parameterTypes.any { type ->
+                        type.declaredConstructors.any {
+                            MapsCarUiStatePatches.isCarSearchUiStateConstructor(it.parameterTypes)
+                        }
+                    }
+                }
+            }.ifEmpty { taps }
+        } else {
+            taps
+        }
+        for (tap in preferred) {
             if (!hookOnce("${tap.headerClass.name}#${tap.tapMethod.name}#voiceOnlyTap")) continue
-            val doneResult = runCatching {
-                val loader = tap.headerClass.classLoader ?: return@runCatching null
-                val unit = Reflect.findClass("blzo", loader)
-                Reflect.getStaticObjectField(unit, "a")
-            }.getOrNull()
+            val doneResult = unitResultFor(tap.tapMethod.returnType)
             runCatching {
                 HookChains.hookMethod(xposed, tap.tapMethod, object : MethodHook() {
                     override fun beforeHookedMethod(param: HookParam) {
@@ -720,6 +510,24 @@ object MapsVoiceOnlyPathHooks {
             }
         }
         return hooked
+    }
+
+    /**
+     * Many Maps "done" returns are a singleton unit type with static field `a`.
+     * Resolve from the method's return type — never by obfuscated class name.
+     */
+    private fun unitResultFor(returnType: Class<*>): Any? {
+        if (returnType == Void.TYPE || returnType == Void::class.java) return null
+        return runCatching {
+            for (field in returnType.declaredFields) {
+                if (!Modifier.isStatic(field.modifiers)) continue
+                if (!returnType.isAssignableFrom(field.type)) continue
+                field.isAccessible = true
+                val value = field.get(null) ?: continue
+                if (returnType.isInstance(value)) return value
+            }
+            null
+        }.getOrNull()
     }
 
     private fun forceTrueBoolsFalse(args: Array<Any?>, params: Array<Class<*>>): Int {

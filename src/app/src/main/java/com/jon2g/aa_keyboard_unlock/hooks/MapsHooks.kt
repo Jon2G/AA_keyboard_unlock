@@ -418,7 +418,23 @@ object MapsHooks {
             }
         }
         var hookedL = 0
-        for (tap in targets.searchHeaderTaps) {
+        val taps = if (targets.uiStateTypes.isNotEmpty()) {
+            val preferred = targets.searchHeaderTaps.filter { tap ->
+                targets.uiStateTypes.any { ui ->
+                    tap.headerClass.declaredMethods.any { m ->
+                        m.parameterCount == 0 && m.returnType == ui
+                    } || tap.headerClass.declaredConstructors.any { c ->
+                        c.parameterTypes.any { it == ui }
+                    } || tap.headerClass.declaredFields.any { f ->
+                        !Modifier.isStatic(f.modifiers) && f.type == ui
+                    }
+                }
+            }
+            preferred.ifEmpty { targets.searchHeaderTaps }
+        } else {
+            targets.searchHeaderTaps
+        }
+        for (tap in taps) {
             val keyboardTap = object : MethodHook() {
                 override fun beforeHookedMethod(param: HookParam) {
                     if (!hooksActive()) return
@@ -437,8 +453,19 @@ object MapsHooks {
                         "${tap.headerClass.simpleName}.${tap.tapMethod.name}() — native rek.d keyboard",
                         always = true
                     )
-                    openNativeKeyboard(rek)
-                    param.result = runCatching { blhxDone(classLoader, tap.tapMethod.returnType) }.getOrNull()
+                    // Car-search (qnu/rkw): bind-only matches the proven path. Calling reh.b()
+                    // on a guessed overlay field breaks IME show even when parked.
+                    openNativeKeyboard(rek, showCarImeOverlay = false)
+                    val done = blhxDone(classLoader, tap.tapMethod.returnType)
+                    if (done != null) {
+                        param.result = done
+                    } else {
+                        ModuleLog.maps(
+                            "MAPS-004",
+                            "no unit result for ${tap.tapMethod.returnType.simpleName} — original may still run",
+                            always = true
+                        )
+                    }
                 }
             }
             runCatching {
@@ -1086,8 +1113,12 @@ object MapsHooks {
 
     private fun isRekLike(obj: Any): Boolean = isRekLikeType(obj.javaClass)
 
-    /** Stock Maps car IME: rel.d() bind, then reh.b() show. */
-    private fun openNativeKeyboard(rek: Any) {
+    /**
+     * Stock Maps car IME bind via rek.d().
+     * @param showCarImeOverlay when true, also attempt reh.b() show on View-anchored overlays.
+     *   Car-search header taps must pass false — that path only needs d() + skip original.
+     */
+    private fun openNativeKeyboard(rek: Any, showCarImeOverlay: Boolean = true) {
         lastRek = WeakReference(rek)
         runCatching {
             Reflect.callMethod(rek, "d")
@@ -1096,8 +1127,23 @@ object MapsHooks {
             ModuleLog.maps("MAPS-004", "rek.d() failed: ${it.message}", always = true)
             return
         }
+        if (!showCarImeOverlay) {
+            ModuleLog.maps("MAPS-002", "rek.d() bind-only (skip reh.b)", always = true)
+            return
+        }
+        if (rek.javaClass.isInterface || !hasViewAnchor(rek)) {
+            ModuleLog.maps("MAPS-002", "rek.d() bind-only (no View anchor / interface)", always = true)
+            return
+        }
         invokeSnpBindIfPresent()
         scheduleShowCarIme(rek)
+    }
+
+    private fun hasViewAnchor(rek: Any): Boolean {
+        if (runCatching { Reflect.callMethod(rek, "f") as? View }.getOrNull() != null) return true
+        return rek.javaClass.declaredFields.any {
+            !Modifier.isStatic(it.modifiers) && View::class.java.isAssignableFrom(it.type)
+        }
     }
 
     private fun scheduleShowCarIme(rek: Any) {
@@ -1144,19 +1190,32 @@ object MapsHooks {
     }
 
     private fun blhxDone(classLoader: ClassLoader, returnType: Class<*>? = null): Any? {
-        blhxSingleton?.let { return it }
-        runCatching {
-            val blhx = findMapsClass(classLoader, "blhx")
-            val value = Reflect.getStaticObjectField(blhx, "a")
-            if (value != null) {
-                blhxSingleton = value
-                return value
+        blhxSingleton?.let { cached ->
+            if (returnType == null || returnType.isInstance(cached)) return cached
+        }
+        // Prefer the hooked method's return type singleton (e.g. unit/done). Never require a
+        // fixed short name — R8 renames these freely across Maps builds.
+        if (returnType != null && returnType != Void.TYPE && returnType != Void::class.java) {
+            val fromReturn = unitSingleton(returnType)
+            if (fromReturn != null) {
+                blhxSingleton = fromReturn
+                return fromReturn
             }
         }
-        if (returnType != null && returnType != Void.TYPE && returnType != Void::class.java) {
-            return null
-        }
         return null
+    }
+
+    private fun unitSingleton(returnType: Class<*>): Any? {
+        return runCatching {
+            for (field in returnType.declaredFields) {
+                if (!Modifier.isStatic(field.modifiers)) continue
+                if (!returnType.isAssignableFrom(field.type)) continue
+                field.isAccessible = true
+                val value = field.get(null) ?: continue
+                if (returnType.isInstance(value)) return value
+            }
+            null
+        }.getOrNull()
     }
 
     private fun findMapsClass(classLoader: ClassLoader, shortName: String): Class<*> {

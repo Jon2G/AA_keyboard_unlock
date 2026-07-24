@@ -111,9 +111,10 @@ object MapsSignatureDiscovery {
                         fingerprint,
                         payload.members.size,
                     )
-                    cached = resolved
-                    lastStats = resolved.stats
-                    return resolved
+                    val enriched = enrichGaps(ctx, resolved)
+                    cached = enriched
+                    lastStats = enriched.stats
+                    return enriched
                 }
                 DiscoveryCache.logMiss(
                     ModuleLog.Process.MAPS,
@@ -131,7 +132,7 @@ object MapsSignatureDiscovery {
             }
         }
 
-        val targets = scan(ctx)
+        val targets = enrichGaps(ctx, scan(ctx))
         cached = targets
         lastStats = targets.stats
         if (hostCtx != null && fingerprint != null && !targets.isEffectivelyEmpty()) {
@@ -334,6 +335,145 @@ object MapsSignatureDiscovery {
             stats = stats,
             fromCache = false,
         )
+    }
+
+    /**
+     * Fill gaps after dex/string scan. Optional short-name candidates are accepted only when
+     * API shape matches (same contract as Gearhead seeds) — never hooked by name alone.
+     */
+    private fun enrichGaps(ctx: HookContext, base: DiscoveredTargets): DiscoveredTargets {
+        val hints = base.hintMethods.toMutableList()
+        val headerTaps = linkedSetOf<SearchHeaderTap>().also { it += base.searchHeaderTaps }
+        val uiStateTypes = linkedSetOf<Class<*>>().also { it += base.uiStateTypes }
+        val headerCtors = base.headerRestrictionConstructors.toMutableList()
+        val paths = ctx.sourcePaths.ifEmpty { listOf(ctx.sourcePath) }
+
+        if (uiStateTypes.isEmpty()) {
+            resolveUiStateViaStringAnchor(ctx, paths, uiStateTypes, headerTaps)
+        }
+
+        applyShapeValidatedFallbacks(ctx.classLoader, hints, headerTaps, uiStateTypes, headerCtors)
+
+        val ranked = headerTaps
+            .sortedByDescending { scoreSearchHeaderTap(it, uiStateTypes) }
+            .take(8)
+
+        return base.copy(
+            hintMethods = hints
+                .distinctBy { "${it.declaringClass.name}#${it.name}#${it.parameterCount}" }
+                .sortedByDescending { scoreHintMethod(it) }
+                .take(16),
+            searchHeaderTaps = ranked,
+            headerRestrictionConstructors = headerCtors
+                .filter { MapsCarUiStatePatches.isCarSearchUiStateConstructor(it.parameterTypes) }
+                .ifEmpty { headerCtors }
+                .distinct()
+                .take(24),
+            uiStateTypes = uiStateTypes.sortedBy { it.name }.take(8),
+        )
+    }
+
+    /**
+     * Last-resort candidates when string/dex discovery left a critical gap.
+     * Short names are probes only — rejected unless shape validation passes.
+     */
+    private fun applyShapeValidatedFallbacks(
+        classLoader: ClassLoader,
+        hints: MutableList<Method>,
+        headerTaps: MutableSet<SearchHeaderTap>,
+        uiStateTypes: MutableSet<Class<*>>,
+        headerCtors: MutableList<Constructor<*>>,
+    ) {
+        val uiStateProbes = listOf("qnp")
+        val headerProbes = listOf("qnu")
+        val hintOwnerProbes = listOf("onl")
+
+        if (uiStateTypes.isEmpty()) {
+            for (name in uiStateProbes) {
+                val clazz = loadObfuscatedClass(classLoader, name) ?: continue
+                if (!clazz.declaredConstructors.any {
+                        MapsCarUiStatePatches.isCarSearchUiStateConstructor(it.parameterTypes)
+                    }
+                ) {
+                    continue
+                }
+                uiStateTypes += clazz
+                headerCtors += clazz.declaredConstructors.filter {
+                    MapsCarUiStatePatches.isCarSearchUiStateConstructor(it.parameterTypes)
+                }
+                ModuleLog.maps(
+                    "MAPS-DRIVE-010",
+                    "shape-validated UiState fallback ${clazz.simpleName}",
+                    always = true
+                )
+            }
+        }
+
+        val hasUiStateHeader = headerTaps.any { headerHoldsUiState(it.headerClass, uiStateTypes) }
+        if (!hasUiStateHeader) {
+            for (name in headerProbes) {
+                val clazz = loadObfuscatedClass(classLoader, name) ?: continue
+                val tap = findSearchHeaderTap(clazz) ?: continue
+                if (!isValidatedCarSearchHeader(clazz, uiStateTypes)) continue
+                headerTaps.add(tap)
+                ModuleLog.maps(
+                    "MAPS-DRIVE-010",
+                    "shape-validated header fallback ${clazz.simpleName}.${tap.tapMethod.name}()",
+                    always = true
+                )
+            }
+        }
+
+        val hasDrivingHint = hints.any { method ->
+            method.parameterTypes.firstOrNull()?.name == Context::class.java.name &&
+                method.parameterTypes.count {
+                    it == Boolean::class.javaPrimitiveType || it == Boolean::class.java
+                } >= 2
+        }
+        if (!hasDrivingHint) {
+            val booleanPrimitive = Boolean::class.javaPrimitiveType!!
+            for (name in hintOwnerProbes) {
+                val clazz = loadObfuscatedClass(classLoader, name) ?: continue
+                for (method in clazz.declaredMethods) {
+                    if (!Modifier.isStatic(method.modifiers)) continue
+                    if (method.returnType != String::class.java) continue
+                    if (method.parameterTypes.firstOrNull()?.name != Context::class.java.name) continue
+                    val bools = method.parameterTypes.count {
+                        it == booleanPrimitive || it == Boolean::class.java
+                    }
+                    if (bools < 2) continue
+                    hints += method
+                    ModuleLog.maps(
+                        "MAPS-DRIVE-010",
+                        "shape-validated hint fallback ${clazz.simpleName}.${method.name}()",
+                        always = true
+                    )
+                }
+            }
+        }
+    }
+
+    private fun isValidatedCarSearchHeader(
+        clazz: Class<*>,
+        uiStateTypes: Set<Class<*>>,
+    ): Boolean {
+        findSearchHeaderTap(clazz) ?: return false
+        if (uiStateTypes.isNotEmpty() && headerHoldsUiState(clazz, uiStateTypes)) return true
+        // UiState may not be registered yet — accept zero-arg getter whose return type
+        // itself matches the car-search UiState constructor shape.
+        return clazz.declaredMethods.any { method ->
+            method.parameterCount == 0 &&
+                !Modifier.isStatic(method.modifiers) &&
+                method.returnType.declaredConstructors.any {
+                    MapsCarUiStatePatches.isCarSearchUiStateConstructor(it.parameterTypes)
+                }
+        } || clazz.declaredConstructors.any { ctor ->
+            ctor.parameterTypes.any { type ->
+                type.declaredConstructors.any {
+                    MapsCarUiStatePatches.isCarSearchUiStateConstructor(it.parameterTypes)
+                }
+            }
+        }
     }
 
     private fun inspectClass(
