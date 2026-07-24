@@ -47,12 +47,30 @@ object MapsSignatureDiscovery {
         val voiceBypassMethods: List<Method> = emptyList(),
         val headerRestrictionConstructors: List<Constructor<*>> = emptyList(),
         val stats: ScanStats = ScanStats(),
+        val fromCache: Boolean = false,
     ) {
         fun isEffectivelyEmpty(): Boolean =
             hintMethods.isEmpty() &&
                 rekOverlayTypes.isEmpty() &&
                 searchHeaderTaps.isEmpty() &&
                 carImeTypes.isEmpty()
+
+        fun toCachePayload(): DiscoveryCache.CachePayload {
+            val members = mutableListOf<DiscoveryCache.MemberRef>()
+            hintMethods.forEach { members += DiscoveryCache.methodRef(it, "hint") }
+            rekOverlayTypes.forEach { members += DiscoveryCache.classRef(it, "rek") }
+            carImeTypes.forEach { members += DiscoveryCache.classRef(it, "car_ime") }
+            searchHeaderTaps.forEach {
+                members += DiscoveryCache.methodRef(it.tapMethod, "header_tap|${it.rekFieldName}")
+            }
+            carParameterMethods.forEach { members += DiscoveryCache.methodRef(it, "car_params") }
+            keyboardRestrictedMethods.forEach { members += DiscoveryCache.methodRef(it, "kbd_restricted") }
+            voiceBypassMethods.forEach { members += DiscoveryCache.methodRef(it, "voice_bypass") }
+            headerRestrictionConstructors.forEach {
+                members += DiscoveryCache.ctorRef(it, "header_restrict_ctor")
+            }
+            return DiscoveryCache.CachePayload(members)
+        }
     }
 
     @Volatile
@@ -66,16 +84,109 @@ object MapsSignatureDiscovery {
     fun discover(ctx: HookContext, force: Boolean = false): DiscoveredTargets {
         if (!force) {
             cached?.let { return it }
+        } else {
+            cached = null
         }
+
+        val hostCtx = GearheadSignatureDiscovery.resolveHostContext()
+        val fingerprint = hostCtx?.let {
+            DiscoveryCache.packageFingerprint(it, ctx.packageName)
+        }
+
+        if (!force && hostCtx != null && fingerprint != null) {
+            val payload = DiscoveryCache.load(hostCtx, DiscoveryCache.Namespace.MAPS, fingerprint)
+            if (payload != null) {
+                val resolved = resolveFromCache(ctx.classLoader, payload)
+                if (resolved != null && !resolved.isEffectivelyEmpty()) {
+                    DiscoveryCache.logHit(
+                        ModuleLog.Process.MAPS,
+                        DiscoveryCache.Namespace.MAPS,
+                        fingerprint,
+                        payload.members.size,
+                    )
+                    cached = resolved
+                    lastStats = resolved.stats
+                    return resolved
+                }
+                DiscoveryCache.logMiss(
+                    ModuleLog.Process.MAPS,
+                    DiscoveryCache.Namespace.MAPS,
+                    fingerprint,
+                    "resolve_failed",
+                )
+            } else {
+                DiscoveryCache.logMiss(
+                    ModuleLog.Process.MAPS,
+                    DiscoveryCache.Namespace.MAPS,
+                    fingerprint,
+                    "no_entry",
+                )
+            }
+        }
+
         val targets = scan(ctx)
         cached = targets
         lastStats = targets.stats
+        if (hostCtx != null && fingerprint != null && !targets.isEffectivelyEmpty()) {
+            val payload = targets.toCachePayload()
+            DiscoveryCache.save(hostCtx, DiscoveryCache.Namespace.MAPS, fingerprint, payload)
+            DiscoveryCache.logWrite(
+                ModuleLog.Process.MAPS,
+                DiscoveryCache.Namespace.MAPS,
+                fingerprint,
+                payload.members.size,
+            )
+        }
         logDiscovery(targets)
         return targets
     }
 
     fun invalidate() {
         cached = null
+        GearheadSignatureDiscovery.resolveHostContext()?.let {
+            DiscoveryCache.clear(it, DiscoveryCache.Namespace.MAPS)
+        }
+    }
+
+    private fun resolveFromCache(
+        classLoader: ClassLoader,
+        payload: DiscoveryCache.CachePayload,
+    ): DiscoveredTargets? {
+        fun methods(tag: String) = payload.members
+            .filter { it.tag == tag }
+            .mapNotNull { DiscoveryCache.resolveMethod(classLoader, it) }
+
+        fun classes(tag: String) = payload.members
+            .filter { it.tag == tag }
+            .mapNotNull { DiscoveryCache.resolveClass(classLoader, it) }
+
+        val headerTaps = payload.members
+            .filter { it.tag.startsWith("header_tap") }
+            .mapNotNull { ref ->
+                val method = DiscoveryCache.resolveMethod(classLoader, ref) ?: return@mapNotNull null
+                val field = ref.tag.substringAfter('|', missingDelimiterValue = "")
+                if (field.isEmpty()) return@mapNotNull null
+                SearchHeaderTap(
+                    headerClass = method.declaringClass,
+                    tapMethod = method,
+                    rekFieldName = field,
+                )
+            }
+
+        return DiscoveredTargets(
+            hintMethods = methods("hint"),
+            rekOverlayTypes = classes("rek"),
+            carImeTypes = classes("car_ime"),
+            searchHeaderTaps = headerTaps,
+            carParameterMethods = methods("car_params"),
+            keyboardRestrictedMethods = methods("kbd_restricted"),
+            voiceBypassMethods = methods("voice_bypass"),
+            headerRestrictionConstructors = payload.members
+                .filter { it.tag == "header_restrict_ctor" }
+                .mapNotNull { DiscoveryCache.resolveConstructor(classLoader, it) },
+            stats = ScanStats(),
+            fromCache = true,
+        )
     }
 
     private fun scan(ctx: HookContext): DiscoveredTargets {
@@ -191,6 +302,7 @@ object MapsSignatureDiscovery {
                 .take(12),
             headerRestrictionConstructors = headerCtors.take(24),
             stats = stats,
+            fromCache = false,
         )
     }
 
@@ -471,6 +583,8 @@ object MapsSignatureDiscovery {
 
         val rekField = clazz.declaredFields.firstOrNull { field ->
             !Modifier.isStatic(field.modifiers) && isRekOverlayTypeStrict(field.type)
+        } ?: clazz.declaredFields.firstOrNull { field ->
+            !Modifier.isStatic(field.modifiers) && isRekOverlayTypeLoose(field.type)
         } ?: return null
 
         return SearchHeaderTap(clazz, tapMethod, rekField.name)

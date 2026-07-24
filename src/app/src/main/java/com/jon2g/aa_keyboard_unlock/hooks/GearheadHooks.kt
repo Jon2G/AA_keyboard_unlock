@@ -39,6 +39,10 @@ object GearheadHooks {
     private var installedForProcess = false
 
     @Volatile
+    private var targets: GearheadSignatureDiscovery.DiscoveredTargets =
+        GearheadSignatureDiscovery.DiscoveredTargets()
+
+    @Volatile
     private var activeInputFragment: WeakReference<Any>? = null
 
     @Volatile
@@ -66,15 +70,19 @@ object GearheadHooks {
             "enabled=${ModulePrefs.isEnabled()} debug=${ModulePrefs.isDebug()} " +
                 "pref=${ModulePrefs.lastPrefSource} build=${BuildConfig.BUILD_TYPE} pkg=${ctx.packageName}"
         )
-        hookSensorCallbacks(ctx, "lhk")
-        hookSensorCallbacks(ctx, "lhu")
+        targets = GearheadSignatureDiscovery.discover(ctx)
+        hookSensorCallbacks(ctx)
         hookLocationManager(ctx)
         hookInputMethodFragment(ctx)
         hookParkingAndAssistantSettings(ctx)
         hookCarUiConstraints(ctx)
         hookCarAppKeyboardGate(ctx)
         hookMapsNativeSearchKeyboard(ctx)
-        ModuleLog.gearhead("GH-INSTALL", "hooks installed for ${ctx.packageName}", always = true)
+        ModuleLog.gearhead(
+            "GH-INSTALL",
+            "hooks installed for ${ctx.packageName} discoveryCache=${targets.fromCache}",
+            always = true
+        )
     }
 
     private fun findGearheadClass(classLoader: ClassLoader, shortName: String): Class<*> {
@@ -120,285 +128,320 @@ object GearheadHooks {
         }
     }
 
-    private fun hookSensorCallbacks(ctx: HookContext, shortName: String) {
-        runCatching {
-            val clazz = findGearheadClass(ctx.classLoader, shortName)
-            if (clazz.isInterface || Modifier.isAbstract(clazz.modifiers)) {
-                log("Skipping $shortName.d (abstract/interface)")
-                return
+    private fun hookSensorCallbacks(ctx: HookContext) {
+        val methods = targets.sensorCallbacks
+        if (methods.isNotEmpty()) {
+            for (method in methods) {
+                runCatching {
+                    HookChains.hookMethod(xposed, method, sensorSpoofHook)
+                    log("Hooked sensor ${method.declaringClass.name}.${method.name}")
+                }.onFailure {
+                    log("Failed sensor ${method.declaringClass.name}.${method.name}: ${it.message}")
+                }
             }
-            HookChains.hookAllMethods(xposed, clazz, "d", sensorSpoofHook)
-            log("Hooked $shortName.d (${clazz.name})")
-        }.onFailure { log("Failed to hook $shortName.d: ${it.message}") }
+            return
+        }
+        // Legacy short-name fallback (pre-discovery / cache miss)
+        for (shortName in listOf("lhl", "lhv", "lhk", "lhu")) {
+            runCatching {
+                val clazz = findGearheadClass(ctx.classLoader, shortName)
+                if (clazz.isInterface || Modifier.isAbstract(clazz.modifiers)) return@runCatching
+                HookChains.hookAllMethods(xposed, clazz, "d", sensorSpoofHook)
+                log("Hooked fallback $shortName.d (${clazz.name})")
+            }.onFailure { log("Failed fallback $shortName.d: ${it.message}") }
+        }
     }
 
     private fun hookLocationManager(ctx: HookContext) {
-        runCatching {
-            val lht = findGearheadClass(ctx.classLoader, "lht")
-            HookChains.findAndHookMethod(xposed, lht, "q", object : MethodHook() {
-                override fun afterHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    if (param.result != true) {
-                        debug("lht.q() forced true (was ${param.result})")
-                        param.result = true
+        val q = targets.locationKeyboardEnabled
+        val s = targets.locationWheelSpeedNonZero
+        val f = targets.locationSpeed
+        if (q != null) {
+            runCatching {
+                HookChains.hookMethod(xposed, q, object : MethodHook() {
+                    override fun afterHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        if (param.result != true) {
+                            debug("loc.q() forced true (was ${param.result})")
+                            param.result = true
+                        }
                     }
-                }
-            })
-            HookChains.findAndHookMethod(xposed, lht, "s", object : MethodHook() {
-                override fun afterHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    if (param.result != false) {
-                        debug("lht.s() forced false (was ${param.result})")
-                        param.result = false
+                })
+                log("Hooked location q (${q.declaringClass.name})")
+            }.onFailure { log("Failed loc.q: ${it.message}") }
+        } else {
+            runCatching {
+                val lhu = findGearheadClass(ctx.classLoader, "lhu")
+                HookChains.findAndHookMethod(xposed, lhu, "q", object : MethodHook() {
+                    override fun afterHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        if (param.result != true) {
+                            debug("lhu.q() forced true (was ${param.result})")
+                            param.result = true
+                        }
                     }
-                }
-            })
-            log("Hooked lht.q/s (${lht.name})")
-        }.onFailure { log("Failed to hook lht: ${it.message}") }
+                })
+                log("Hooked fallback lhu.q")
+            }.onFailure { log("Failed fallback lhu.q: ${it.message}") }
+        }
 
-        runCatching {
-            val lhi = findGearheadClass(ctx.classLoader, "lhi")
-            HookChains.findAndHookMethod(xposed, lhi, "f", object : MethodHook() {
-                override fun afterHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    val speed = param.result as? Float ?: return
-                    if (speed != 0f) {
-                        debug("lhi.f() speed $speed -> 0")
-                        param.result = 0f
+        if (s != null) {
+            runCatching {
+                HookChains.hookMethod(xposed, s, object : MethodHook() {
+                    override fun afterHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        if (param.result != false) {
+                            debug("loc.s() forced false (was ${param.result})")
+                            param.result = false
+                        }
                     }
-                }
-            })
-            log("Hooked lhi.f (${lhi.name})")
-        }.onFailure { log("Failed to hook lhi.f: ${it.message}") }
+                })
+                log("Hooked location s (${s.declaringClass.name})")
+            }.onFailure { log("Failed loc.s: ${it.message}") }
+        } else {
+            runCatching {
+                val lhu = findGearheadClass(ctx.classLoader, "lhu")
+                HookChains.findAndHookMethod(xposed, lhu, "s", object : MethodHook() {
+                    override fun afterHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        if (param.result != false) {
+                            debug("lhu.s() forced false (was ${param.result})")
+                            param.result = false
+                        }
+                    }
+                })
+                log("Hooked fallback lhu.s")
+            }.onFailure { log("Failed fallback lhu.s: ${it.message}") }
+        }
+
+        if (f != null) {
+            runCatching {
+                HookChains.hookMethod(xposed, f, object : MethodHook() {
+                    override fun afterHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        val speed = param.result as? Float ?: return
+                        if (speed != 0f) {
+                            debug("loc.f() speed $speed -> 0")
+                            param.result = 0f
+                        }
+                    }
+                })
+                log("Hooked location f (${f.declaringClass.name})")
+            }.onFailure { log("Failed loc.f: ${it.message}") }
+        }
     }
 
     private fun hookParkingAndAssistantSettings(ctx: HookContext) {
-        runCatching {
-            val lht = findGearheadClass(ctx.classLoader, "lht")
-            val lha = findGearheadClass(ctx.classLoader, "lha")
-            val carParked = Reflect.getStaticObjectField(lha, LHA_FIELD_CAR_PARKED)
-            HookChains.findAndHookMethod(xposed, lht, "c", object : MethodHook() {
-                override fun afterHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    if (param.result != carParked) {
-                        debug("lht.c() forced CAR_PARKED (was ${param.result})")
-                        param.result = carParked
+        val carParked = targets.carParkedValue()
+        val parking = targets.locationParkingState
+        if (parking != null && carParked != null) {
+            runCatching {
+                HookChains.hookMethod(xposed, parking, object : MethodHook() {
+                    override fun afterHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        if (param.result != carParked) {
+                            debug("loc.c() forced CAR_PARKED (was ${param.result})")
+                            param.result = carParked
+                        }
                     }
-                }
-            })
-            log("Hooked lht.c (${lht.name})")
-        }.onFailure { log("Failed to hook lht.c: ${it.message}") }
+                })
+                log("Hooked location parking c (${parking.declaringClass.name})")
+            }.onFailure { log("Failed loc.c: ${it.message}") }
+        } else {
+            runCatching {
+                val lhu = findGearheadClass(ctx.classLoader, "lhu")
+                val lhb = findGearheadClass(ctx.classLoader, "lhb")
+                val parked = Reflect.getStaticObjectField(lhb, LHA_FIELD_CAR_PARKED)
+                HookChains.findAndHookMethod(xposed, lhu, "c", object : MethodHook() {
+                    override fun afterHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        if (param.result != parked) {
+                            debug("lhu.c() forced CAR_PARKED (was ${param.result})")
+                            param.result = parked
+                        }
+                    }
+                })
+                log("Hooked fallback lhu.c")
+            }.onFailure { log("Failed fallback lhu.c: ${it.message}") }
+        }
 
-        runCatching {
-            val lhi = findGearheadClass(ctx.classLoader, "lhi")
-            val lha = findGearheadClass(ctx.classLoader, "lha")
-            val carParked = Reflect.getStaticObjectField(lha, LHA_FIELD_CAR_PARKED)
-            HookChains.findAndHookMethod(xposed, lhi, "d", object : MethodHook() {
-                override fun afterHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    if (param.result != carParked) {
-                        debug("lhi.d() forced CAR_PARKED (was ${param.result})")
-                        param.result = carParked
+        targets.assistantKeyboardEnabled?.let { method ->
+            runCatching {
+                HookChains.hookMethod(xposed, method, object : MethodHook() {
+                    override fun afterHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        if (param.result != true) {
+                            debug("assist.a() forced true (was ${param.result})")
+                            param.result = true
+                        }
                     }
-                }
-            })
-            log("Hooked lhi.d (${lhi.name})")
-        }.onFailure { log("Failed to hook lhi.d: ${it.message}") }
+                })
+                log("Hooked assistant keyboard a (${method.declaringClass.name})")
+            }.onFailure { log("Failed assist.a: ${it.message}") }
+        }
 
-        runCatching {
-            val kxk = findGearheadClass(ctx.classLoader, "kxk")
-            HookChains.findAndHookMethod(xposed, kxk, "a", object : MethodHook() {
-                override fun afterHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    if (param.result != true) {
-                        debug("kxk.a() forced true (was ${param.result})")
-                        param.result = true
+        // Force keyboard-enable callbacks (lha.a(boolean)) when discovered.
+        targets.keyboardCallbackInterface?.let { iface ->
+            runCatching {
+                HookChains.hookAllMethods(xposed, iface, "a", object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        if (param.args.getOrNull(0) == false) {
+                            debug("kbd callback a() forced true")
+                            param.args[0] = true
+                        }
                     }
-                }
-            })
-            log("Hooked kxk.a (${kxk.name})")
-        }.onFailure { log("Failed to hook kxk.a: ${it.message}") }
+                })
+                log("Hooked keyboard callback interface ${iface.name}")
+            }.onFailure { log("Failed kbd callback: ${it.message}") }
+        }
     }
 
     private fun hookCarUiConstraints(ctx: HookContext) {
-        runCatching {
-            val jpm = findGearheadClass(ctx.classLoader, "jpm")
-            for (method in listOf("a", "b")) {
-                HookChains.findAndHookMethod(xposed, jpm, method, object : MethodHook() {
-                    override fun beforeHookedMethod(param: HookParam) {
-                        debugEntry("jpm.$method()")
-                    }
+        val a = targets.carUiTouchscreen
+        val b = targets.carUiTouchpad
+        if (a != null || b != null) {
+            for (method in listOfNotNull(a, b)) {
+                runCatching {
+                    HookChains.hookMethod(xposed, method, object : MethodHook() {
+                        override fun beforeHookedMethod(param: HookParam) {
+                            debugEntry("carUi.${method.name}()")
+                        }
 
+                        override fun afterHookedMethod(param: HookParam) {
+                            if (!ModulePrefs.isEnabled()) return
+                            if (param.result == true) {
+                                debug("carUi.${method.name}() forced false (was true)")
+                                param.result = false
+                            }
+                        }
+                    })
+                    log("Hooked carUi ${method.declaringClass.name}.${method.name}")
+                }.onFailure { log("Failed carUi.${method.name}: ${it.message}") }
+            }
+            return
+        }
+        runCatching {
+            val jqt = findGearheadClass(ctx.classLoader, "jqt")
+            for (method in listOf("a", "b")) {
+                HookChains.findAndHookMethod(xposed, jqt, method, object : MethodHook() {
                     override fun afterHookedMethod(param: HookParam) {
                         if (!ModulePrefs.isEnabled()) return
                         if (param.result == true) {
-                            debug("jpm.$method() forced false (was true)")
+                            debug("jqt.$method() forced false (was true)")
                             param.result = false
                         }
                     }
                 })
             }
-            log("Hooked jpm.a/b (${jpm.name})")
-        }.onFailure { log("Failed to hook jpm: ${it.message}") }
+            log("Hooked fallback jqt.a/b")
+        }.onFailure { log("Failed fallback jqt: ${it.message}") }
     }
 
     private fun hookCarAppKeyboardGate(ctx: HookContext) {
-        runCatching {
-            val jtg = findGearheadClass(ctx.classLoader, "jtg")
-            HookChains.findAndHookMethod(xposed, jtg, "b", object : MethodHook() {
-                override fun beforeHookedMethod(param: HookParam) {
-                    debugEntry("jtg.b()")
-                }
+        targets.carAppKeyboardBlocked?.let { method ->
+            runCatching {
+                HookChains.hookMethod(xposed, method, object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
+                        debugEntry("carApp.blocked()")
+                    }
 
+                    override fun afterHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        if (param.result != false) {
+                            debug("carApp.blocked() forced false (was ${param.result})")
+                            param.result = false
+                        }
+                    }
+                })
+                log("Hooked carApp blocked (${method.declaringClass.name})")
+            }.onFailure { log("Failed carApp blocked: ${it.message}") }
+        } ?: runCatching {
+            val juv = findGearheadClass(ctx.classLoader, "juv")
+            HookChains.findAndHookMethod(xposed, juv, "b", object : MethodHook() {
                 override fun afterHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     if (param.result != false) {
-                        debug("jtg.b() forced false (keyboard allowed, was ${param.result})")
+                        debug("juv.b() forced false (was ${param.result})")
                         param.result = false
                     }
                 }
             })
-            HookChains.hookAllConstructors(xposed, jtg, object : MethodHook() {
-                override fun afterHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    runCatching {
-                        val component = Reflect.getObjectField(param.thisObject, "a")
-                        val state = Reflect.getObjectField(param.thisObject, "g")
-                        Reflect.callMethod(state, "d", true)
-                        val gij = Reflect.getObjectField(param.thisObject, "h")
-                        Reflect.callMethod(gij, "a", 6)
-                        debug("jtg init: keyboard state forced true for $component")
-                    }
-                }
-            })
-            log("Hooked jtg.b() + constructors (${jtg.name})")
-        }.onFailure { log("Failed to hook jtg: ${it.message}") }
+            log("Hooked fallback juv.b")
+        }.onFailure { log("Failed fallback juv.b: ${it.message}") }
 
-        hookTemplateKeyboardMethod(ctx, "jyn", "b", Boolean::class.javaPrimitiveType!!)
-        hookTemplateKeyboardMethod(ctx, "jys", "b", Boolean::class.javaPrimitiveType!!)
-        hookTemplateKeyboardMethod(ctx, "jyu", "d", Boolean::class.javaPrimitiveType!!)
-        hookTemplateHintMethod(ctx, "jyn", "p", Boolean::class.javaPrimitiveType!!)
-        hookTemplateHintMethod(ctx, "jys", "p", Boolean::class.javaPrimitiveType!!)
-
-        runCatching {
-            val lgz = findGearheadClass(ctx.classLoader, "lgz")
-            hookLgzImplementors(ctx, lgz, "lht")
-            hookLgzImplementors(ctx, lgz, "jtg")
-            hookLgzImplementors(ctx, lgz, "lhl")
-            log("Hooked lgz.a implementors")
-        }.onFailure { log("Failed to hook lgz.a: ${it.message}") }
-
-        runCatching {
-            val gxy = findGearheadClass(ctx.classLoader, "gxy")
-            val gyb = findGearheadClass(ctx.classLoader, "gyb")
-            val hgx = findGearheadClass(ctx.classLoader, "hgx")
-            HookChains.findAndHookMethod(xposed, gxy, "d", object : MethodHook() {
-                override fun beforeHookedMethod(param: HookParam) {
-                    debugEntry("gxy.d()")
-                    if (!ModulePrefs.isEnabled()) return
-                    if (param.args[1] == false) {
-                        debug("gxy.d() isKeyboardAllowed forced true")
-                        param.args[1] = true
-                    }
-                }
-            }, gyb, Boolean::class.javaPrimitiveType!!, hgx)
-            log("Hooked gxy.d (${gxy.name})")
-        }.onFailure { log("Failed to hook gxy.d: ${it.message}") }
-
-        runCatching {
-            val gxz = findGearheadClass(ctx.classLoader, "gxz")
-            HookChains.hookAllConstructors(xposed, gxz, object : MethodHook() {
-                override fun beforeHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    if (param.args.size >= 2 && param.args[1] != true) {
-                        debug("gxz isKeyboardAllowed forced true (was ${param.args[1]})")
-                        param.args[1] = true
-                    }
-                }
-            })
-            log("Hooked gxz constructors (${gxz.name})")
-        }.onFailure { log("Failed to hook gxz: ${it.message}") }
-
-        runCatching {
-            val gan = findGearheadClass(ctx.classLoader, "gan")
-            HookChains.hookAllConstructors(xposed, gan, object : MethodHook() {
-                override fun beforeHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    if (param.args.size >= 9) {
-                        if (param.args[8] != false || param.args[2] != true) {
-                            debug("gan forced showKeyboard=true voiceOnly=false")
-                            param.args[8] = false
-                            param.args[2] = true
+        targets.carAppConstraintsClass?.let { clazz ->
+            runCatching {
+                HookChains.hookAllConstructors(xposed, clazz, object : MethodHook() {
+                    override fun afterHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        runCatching {
+                            Reflect.setBooleanField(param.thisObject, "b", true)
+                            val state = Reflect.getObjectField(param.thisObject, "g")
+                            if (state != null) {
+                                runCatching { Reflect.callMethod(state, "d", true) }
+                            }
+                            val gij = Reflect.getObjectField(param.thisObject, "h")
+                            if (gij != null) {
+                                runCatching { Reflect.callMethod(gij, "a", 6) }
+                            }
+                            debug("carApp constraints init: keyboard state forced true")
                         }
                     }
-                }
-            })
-            log("Hooked gan constructors (${gan.name})")
-        }.onFailure { log("Failed to hook gan: ${it.message}") }
-    }
-
-    private fun hookLgzImplementors(ctx: HookContext, lgz: Class<*>, outerShortName: String) {
-        val outer = findGearheadClass(ctx.classLoader, outerShortName)
-        val hook = object : MethodHook() {
-            override fun beforeHookedMethod(param: HookParam) {
-                if (!ModulePrefs.isEnabled()) return
-                if (param.args[0] == false) {
-                    debug("lgz.a() forced true in ${param.thisObject?.javaClass?.name}")
-                    param.args[0] = true
-                }
-            }
+                })
+                log("Hooked carApp constraints ctors (${clazz.name})")
+            }.onFailure { log("Failed carApp constraints ctors: ${it.message}") }
         }
-        for (inner in outer.declaredClasses) {
-            if (lgz.isAssignableFrom(inner)) {
-                runCatching {
-                    HookChains.findAndHookMethod(xposed, inner, "a", hook, Boolean::class.javaPrimitiveType!!)
-                }
-            }
+
+        targets.searchHintMethod?.let { method ->
+            runCatching {
+                HookChains.hookMethod(xposed, method, object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
+                        debugEntry("searchHint.d()")
+                        if (!ModulePrefs.isEnabled()) return
+                        if (param.args.getOrNull(1) == false) {
+                            debug("searchHint.d() isKeyboardAllowed forced true")
+                            param.args[1] = true
+                        }
+                    }
+                })
+                log("Hooked searchHint (${method.declaringClass.name}.${method.name})")
+            }.onFailure { log("Failed searchHint: ${it.message}") }
         }
-    }
 
-    private fun hookTemplateHintMethod(
-        ctx: HookContext,
-        className: String,
-        methodName: String,
-        paramType: Class<*>
-    ) {
-        runCatching {
-            val clazz = findGearheadClass(ctx.classLoader, className)
-            HookChains.findAndHookMethod(xposed, clazz, methodName, object : MethodHook() {
-                override fun beforeHookedMethod(param: HookParam) {
-                    debugEntry("$className.$methodName()")
-                    if (!ModulePrefs.isEnabled()) return
-                    if (param.args[0] == false) {
-                        debug("$className.$methodName() forced true")
-                        param.args[0] = true
+        targets.keyboardRestrictionCtor?.let { ctor ->
+            runCatching {
+                HookChains.hookExecutable(xposed, ctor, object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        if (param.args.size >= 2 && param.args[1] != true) {
+                            debug("kbdRestriction isKeyboardAllowed forced true")
+                            param.args[1] = true
+                        }
                     }
-                }
-            }, paramType)
-            log("Hooked $className.$methodName (${clazz.name})")
-        }.onFailure { log("Failed to hook $className.$methodName: ${it.message}") }
-    }
+                })
+                log("Hooked kbdRestriction ctor (${ctor.declaringClass.name})")
+            }.onFailure { log("Failed kbdRestriction ctor: ${it.message}") }
+        }
 
-    private fun hookTemplateKeyboardMethod(
-        ctx: HookContext,
-        className: String,
-        methodName: String,
-        paramType: Class<*>
-    ) {
-        runCatching {
-            val clazz = findGearheadClass(ctx.classLoader, className)
-            HookChains.findAndHookMethod(xposed, clazz, methodName, object : MethodHook() {
-                override fun beforeHookedMethod(param: HookParam) {
-                    debugEntry("$className.$methodName()")
-                    if (!ModulePrefs.isEnabled()) return
-                    if (param.args[0] == false) {
-                        debug("$className.$methodName() forced true")
-                        param.args[0] = true
+        targets.textFieldCtor?.let { ctor ->
+            runCatching {
+                HookChains.hookExecutable(xposed, ctor, object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        if (param.args.size >= 9) {
+                            // showKeyboardByDefault=true (idx 2), voiceOnlyEnabled=false (idx 8)
+                            if (param.args[8] != false || param.args[2] != true) {
+                                debug("textField forced showKeyboard=true voiceOnly=false")
+                                param.args[8] = false
+                                param.args[2] = true
+                            }
+                        }
                     }
-                }
-            }, paramType)
-            log("Hooked $className.$methodName (${clazz.name})")
-        }.onFailure { log("Failed to hook $className.$methodName: ${it.message}") }
+                })
+                log("Hooked textField ctor (${ctor.declaringClass.name})")
+            }.onFailure { log("Failed textField ctor: ${it.message}") }
+        }
     }
 
     private fun hookInputMethodFragment(ctx: HookContext) {
@@ -415,98 +458,138 @@ object GearheadHooks {
             }
         }
 
-        runCatching {
-            val xdb = findGearheadClass(ctx.classLoader, "xdb")
-            HookChains.findAndHookMethod(xposed, xdb, "onStart", object : MethodHook() {
+        targets.imeOnStart?.let { method ->
+            runCatching {
+                HookChains.hookMethod(xposed, method, object : MethodHook() {
+                    override fun afterHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        activeInputFragment = WeakReference(param.thisObject)
+                        debugEntry("ime.onStart()")
+                        val locked = Reflect.getBooleanField(param.thisObject, "c")
+                        Reflect.setBooleanField(param.thisObject, "c", false)
+                        if (locked) {
+                            debug("ime.onStart() forced c=false before d()")
+                        }
+                        runCatching { Reflect.callMethod(param.thisObject, "d") }
+                    }
+                })
+                log("Hooked ime onStart (${method.declaringClass.name})")
+            }.onFailure { log("Failed ime onStart: ${it.message}") }
+        } ?: runCatching {
+            val xaw = findGearheadClass(ctx.classLoader, "xaw")
+            HookChains.findAndHookMethod(xposed, xaw, "onStart", object : MethodHook() {
                 override fun afterHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     activeInputFragment = WeakReference(param.thisObject)
-                    debugEntry("xdb.onStart()")
-                    val locked = Reflect.getBooleanField(param.thisObject, "c")
                     Reflect.setBooleanField(param.thisObject, "c", false)
-                    if (locked) {
-                        debug("xdb.onStart() forced c=false before d()")
-                    }
-                    Reflect.callMethod(param.thisObject, "d")
+                    runCatching { Reflect.callMethod(param.thisObject, "d") }
                 }
             })
-            log("Hooked xdb.onStart (${xdb.name})")
-        }.onFailure { log("Failed to hook xdb.onStart: ${it.message}") }
+            log("Hooked fallback xaw.onStart")
+        }.onFailure { log("Failed fallback xaw.onStart: ${it.message}") }
 
-        for (shortName in listOf("xdl", "xdu")) {
-            runCatching {
-                val clazz = findGearheadClass(ctx.classLoader, shortName)
-                if (clazz.isInterface || Modifier.isAbstract(clazz.modifiers)) {
-                    log("Skipping $shortName.d (abstract/interface)")
-                    return@runCatching
-                }
-                HookChains.findAndHookMethod(xposed, clazz, "d", unlockHook)
-                log("Hooked $shortName.d (${clazz.name})")
-            }.onFailure { log("Failed to hook $shortName.d: ${it.message}") }
+        if (targets.imeUnlockMethods.isNotEmpty()) {
+            for (method in targets.imeUnlockMethods) {
+                runCatching {
+                    HookChains.hookMethod(xposed, method, unlockHook)
+                    log("Hooked ime unlock ${method.declaringClass.name}.${method.name}")
+                }.onFailure { log("Failed ime unlock: ${it.message}") }
+            }
+        } else {
+            for (shortName in listOf("xbg", "xbp", "xdl", "xdu")) {
+                runCatching {
+                    val clazz = findGearheadClass(ctx.classLoader, shortName)
+                    if (clazz.isInterface || Modifier.isAbstract(clazz.modifiers)) return@runCatching
+                    HookChains.findAndHookMethod(xposed, clazz, "d", unlockHook)
+                    log("Hooked fallback $shortName.d")
+                }.onFailure { log("Failed fallback $shortName.d: ${it.message}") }
+            }
         }
 
-        runCatching {
-            val xdu = findGearheadClass(ctx.classLoader, "xdu")
-            HookChains.findAndHookMethod(xposed, xdu, "k", object : MethodHook() {
-                override fun afterHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    if (param.result == true) {
-                        debug("xdu.k() forced false (rotary lockout bypass)")
-                        param.result = false
+        targets.imeRotaryLockout?.let { method ->
+            runCatching {
+                HookChains.hookMethod(xposed, method, object : MethodHook() {
+                    override fun afterHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        if (param.result == true) {
+                            debug("ime.k() forced false (rotary lockout bypass)")
+                            param.result = false
+                        }
                     }
-                }
-            })
-            log("Hooked xdu.k (${xdu.name})")
-        }.onFailure { log("Failed to hook xdu.k: ${it.message}") }
+                })
+                log("Hooked ime rotary k (${method.declaringClass.name})")
+            }.onFailure { log("Failed ime rotary: ${it.message}") }
+        }
 
-        runCatching {
-            val xcu = findGearheadClass(ctx.classLoader, "xcu")
-            HookChains.findAndHookMethod(xposed, xcu, "h", object : MethodHook() {
-                override fun beforeHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    debugEntry("xcu.h() maybeStartExternalKeyboard")
-                }
-            })
-            log("Hooked xcu.h (${xcu.name})")
-        }.onFailure { log("Failed to hook xcu.h: ${it.message}") }
-
-        runCatching {
-            val xdm = findGearheadClass(ctx.classLoader, "xdm")
-            HookChains.findAndHookMethod(xposed, xdm, "e", object : MethodHook() {
-                override fun afterHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    if (param.result == null) {
-                        log("xdm.e() was null — falling back to xdl")
-                        val xdl = findGearheadClass(ctx.classLoader, "xdl")
-                        param.result = Reflect.newInstance(xdl)
+        targets.imeStartExternal?.let { method ->
+            runCatching {
+                HookChains.hookMethod(xposed, method, object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        debugEntry("ime.h() maybeStartExternalKeyboard")
                     }
-                }
-            })
-            log("Hooked xdm.e (${xdm.name})")
-        }.onFailure { log("Failed to hook xdm.e: ${it.message}") }
+                })
+                log("Hooked ime startExternal (${method.declaringClass.name}.${method.name})")
+            }.onFailure { log("Failed ime startExternal: ${it.message}") }
+        }
+
+        targets.imeFactory?.let { method ->
+            runCatching {
+                HookChains.hookMethod(xposed, method, object : MethodHook() {
+                    override fun afterHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        if (param.result == null) {
+                            log("ime.e() was null — trying concrete fragment")
+                            val fallbackClass = targets.imeUnlockMethods.firstOrNull()?.declaringClass
+                                ?: runCatching { findGearheadClass(ctx.classLoader, "xbg") }.getOrNull()
+                            if (fallbackClass != null) {
+                                param.result = Reflect.newInstance(fallbackClass)
+                            }
+                        }
+                    }
+                })
+                log("Hooked ime factory (${method.declaringClass.name}.${method.name})")
+            }.onFailure { log("Failed ime factory: ${it.message}") }
+        }
     }
 
     /**
-     * Maps AA search tap → DemandClientService → kcw.k(trigger=10) → voice.
-     * Block voice sessions and open stock projected IME (xcu.h / xdl.d) — no overlay or broadcasts.
+     * Maps AA search tap → DemandClientService → demand.k(trigger=10) → voice.
+     * Block voice sessions and open stock projected IME — no overlay or broadcasts.
      */
     private fun hookMapsNativeSearchKeyboard(ctx: HookContext) {
         hookProjectedImeCache(ctx)
         hookMapsVoiceSessionBlock(ctx)
-        hookMapsSearchKcw(ctx)
+        hookMapsSearchDemandOpen(ctx)
         hookDemandMicBypass(ctx)
-        hookQibMicPassthrough(ctx)
+        hookDemandTranscriptionPassthrough(ctx)
     }
 
     private fun hookProjectedImeCache(ctx: HookContext) {
+        targets.imeCacheMethod?.let { method ->
+            runCatching {
+                HookChains.hookMethod(xposed, method, object : MethodHook() {
+                    override fun afterHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        activeImeService = WeakReference(param.thisObject)
+                        ModuleLog.gearhead(
+                            "GH-MAPS-000",
+                            "cached active IME service (${param.thisObject?.javaClass?.simpleName})",
+                            always = true
+                        )
+                    }
+                })
+                log("Hooked ime cache (${method.declaringClass.name}.${method.name})")
+            }.onFailure { log("Failed ime cache: ${it.message}") }
+            return
+        }
         runCatching {
             val carRegionId = Reflect.findClass(
                 "com.google.android.gms.car.display.CarRegionId",
                 ctx.classLoader
             )
-            val editorInfo = EditorInfo::class.java
-            val xcu = findGearheadClass(ctx.classLoader, "xcu")
-            HookChains.findAndHookMethod(xposed, xcu, "c", object : MethodHook() {
+            val xaq = findGearheadClass(ctx.classLoader, "xaq")
+            HookChains.findAndHookMethod(xposed, xaq, "c", object : MethodHook() {
                 override fun afterHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     activeImeService = WeakReference(param.thisObject)
@@ -516,9 +599,9 @@ object GearheadHooks {
                         always = true
                     )
                 }
-            }, editorInfo, carRegionId)
-            log("Hooked xcu.c IME cache (${xcu.name})")
-        }.onFailure { log("Failed to hook xcu.c IME cache: ${it.message}") }
+            }, EditorInfo::class.java, carRegionId)
+            log("Hooked fallback xaq.c IME cache")
+        }.onFailure { log("Failed fallback xaq.c: ${it.message}") }
     }
 
     private fun hookMapsVoiceSessionBlock(ctx: HookContext) {
@@ -529,160 +612,209 @@ object GearheadHooks {
             VOICE_SESSION_TYPE_START_TRANSCRIPTION
         )
 
-        runCatching {
-            val kxe = findGearheadClass(ctx.classLoader, "kxe")
-            HookChains.findAndHookMethod(xposed, kxe, "F", object : MethodHook() {
-                override fun beforeHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    val trigger = param.args[0] as Int
-                    if (trigger != VOICE_SEARCH_TRIGGER_MAPS) return
-                    if (micDictationActive || inMapsMicFromHeader()) {
-                        ModuleLog.gearhead("GH-MIC-001", "kxe.F($trigger) mic passthrough", always = true)
-                        return
-                    }
-                    if (!inMapsSearchVoiceBlock()) return
-                    ModuleLog.gearhead(
-                        "GH-MAPS-001",
-                        "kxe.F($trigger) blocked — native keyboard path",
-                        always = true
-                    )
-                    param.result = null
-                }
-            }, Int::class.javaPrimitiveType!!)
-            log("Hooked kxe.F Maps voice block (${kxe.name})")
-        }.onFailure { log("Failed to hook kxe.F Maps voice block: ${it.message}") }
-
-        runCatching {
-            val kxe = findGearheadClass(ctx.classLoader, "kxe")
-            val bundle = Bundle::class.java
-            HookChains.findAndHookMethod(xposed, kxe, "G", object : MethodHook() {
-                override fun beforeHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    val trigger = param.args[0] as Int
-                    if (trigger != VOICE_SEARCH_TRIGGER_MAPS) return
-                    if (micDictationActive || inMapsMicFromHeader()) return
-                    if (!inMapsSearchVoiceBlock()) return
-                    ModuleLog.gearhead("GH-MAPS-001", "kxe.G($trigger) blocked Maps voice session", always = true)
-                    param.result = null
-                }
-            }, Int::class.javaPrimitiveType!!, bundle)
-            log("Hooked kxe.G Maps voice block (${kxe.name})")
-        }.onFailure { log("Failed to hook kxe.G Maps voice block: ${it.message}") }
-
-        runCatching {
-            val kxe = findGearheadClass(ctx.classLoader, "kxe")
-            val voiceSessionConfig = Reflect.findClass(
-                "com.google.android.gearhead.sdk.assistant.VoiceSessionConfig",
-                ctx.classLoader
-            )
-            HookChains.findAndHookMethod(xposed, kxe, "ac", object : MethodHook() {
-                override fun beforeHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    val config = param.args[0] ?: return
-                    val sessionType = Reflect.getIntField(config, "a")
-                    val trigger = Reflect.getIntField(config, "f")
-                    if (micDictationActive || inMapsMicFromHeader()) return
-                    val mapsTapBlock = inMapsSearchVoiceBlock()
-                    if (mapsTapBlock && sessionType in mapsVoiceTypes) {
+        targets.voiceTriggerF?.let { method ->
+            runCatching {
+                HookChains.hookMethod(xposed, method, object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        val trigger = param.args[0] as Int
+                        if (trigger != VOICE_SEARCH_TRIGGER_MAPS) return
+                        if (micDictationActive || inMapsMicFromHeader()) {
+                            ModuleLog.gearhead("GH-MIC-001", "voice.F($trigger) mic passthrough", always = true)
+                            return
+                        }
+                        if (!inMapsSearchVoiceBlock()) return
                         ModuleLog.gearhead(
                             "GH-MAPS-001",
-                            "kxe.ac blocked Maps voice/transcription type=$sessionType trigger=$trigger",
-                            always = true
-                        )
-                        param.result = null
-                    } else if (trigger == VOICE_SEARCH_TRIGGER_MAPS && sessionType in mapsVoiceTypes) {
-                        ModuleLog.gearhead(
-                            "GH-MAPS-001",
-                            "kxe.ac blocked Maps voice/transcription type=$sessionType trigger=$trigger",
+                            "voice.F($trigger) blocked — native keyboard path",
                             always = true
                         )
                         param.result = null
                     }
-                }
-            }, voiceSessionConfig)
-            log("Hooked kxe.ac Maps voice block (${kxe.name})")
-        }.onFailure { log("Failed to hook kxe.ac Maps voice block: ${it.message}") }
+                })
+                log("Hooked voice F (${method.declaringClass.name})")
+            }.onFailure { log("Failed voice F: ${it.message}") }
+        }
+
+        targets.voiceTriggerG?.let { method ->
+            runCatching {
+                HookChains.hookMethod(xposed, method, object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        val trigger = param.args[0] as Int
+                        if (trigger != VOICE_SEARCH_TRIGGER_MAPS) return
+                        if (micDictationActive || inMapsMicFromHeader()) return
+                        if (!inMapsSearchVoiceBlock()) return
+                        ModuleLog.gearhead("GH-MAPS-001", "voice.G($trigger) blocked Maps voice session", always = true)
+                        param.result = null
+                    }
+                })
+                log("Hooked voice G (${method.declaringClass.name})")
+            }.onFailure { log("Failed voice G: ${it.message}") }
+        }
+
+        targets.voiceSessionStart?.let { method ->
+            runCatching {
+                HookChains.hookMethod(xposed, method, object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        val config = param.args[0] ?: return
+                        val sessionType = Reflect.getIntField(config, "a")
+                        val trigger = Reflect.getIntField(config, "f")
+                        if (micDictationActive || inMapsMicFromHeader()) return
+                        val mapsTapBlock = inMapsSearchVoiceBlock()
+                        if ((mapsTapBlock || trigger == VOICE_SEARCH_TRIGGER_MAPS) &&
+                            sessionType in mapsVoiceTypes
+                        ) {
+                            ModuleLog.gearhead(
+                                "GH-MAPS-001",
+                                "voice.session blocked type=$sessionType trigger=$trigger",
+                                always = true
+                            )
+                            param.result = null
+                        }
+                    }
+                })
+                log("Hooked voice session (${method.declaringClass.name}.${method.name})")
+            }.onFailure { log("Failed voice session: ${it.message}") }
+        }
+
+        if (targets.voiceTriggerF == null) {
+            runCatching {
+                val kxi = findGearheadClass(ctx.classLoader, "kxi")
+                HookChains.findAndHookMethod(xposed, kxi, "F", object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        val trigger = param.args[0] as Int
+                        if (trigger != VOICE_SEARCH_TRIGGER_MAPS) return
+                        if (micDictationActive || inMapsMicFromHeader()) return
+                        if (!inMapsSearchVoiceBlock()) return
+                        param.result = null
+                    }
+                }, Int::class.javaPrimitiveType!!)
+                log("Hooked fallback kxi.F")
+            }.onFailure { log("Failed fallback kxi.F: ${it.message}") }
+        }
     }
 
-    private fun hookMapsSearchKcw(ctx: HookContext) {
+    private fun hookMapsSearchDemandOpen(ctx: HookContext) {
+        targets.demandOpen?.let { method ->
+            runCatching {
+                HookChains.hookMethod(xposed, method, object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        val trigger = param.args[0] as Int
+                        if (trigger != VOICE_SEARCH_TRIGGER_MAPS) return
+                        if (inMapsMicFromHeader()) {
+                            debugEntry("demand.k() trigger=$trigger — mic passthrough")
+                            return
+                        }
+                        debugEntry("demand.k() trigger=$trigger — surgical voice block, open native IME")
+                        markMapsSearchVoiceBlock()
+                        closeMapsVoiceDemand(ctx.classLoader)
+                    }
+
+                    override fun afterHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        val trigger = param.args[0] as Int
+                        if (trigger != VOICE_SEARCH_TRIGGER_MAPS) return
+                        if (inMapsMicFromHeader()) return
+                        if (param.hasThrowable()) return
+                        val classLoader = ctx.classLoader
+                        runOnMainThread {
+                            Handler(Looper.getMainLooper()).postDelayed({
+                                if (inMapsMicFromHeader() || micDictationActive) {
+                                    ModuleLog.gearhead(
+                                        "GH-MIC-001",
+                                        "skip keyboard — mic session active",
+                                        always = true
+                                    )
+                                    return@postDelayed
+                                }
+                                ModuleLog.gearhead(
+                                    "GH-MAPS-001",
+                                    "demand.k($trigger) opening native projected keyboard",
+                                    always = true
+                                )
+                                openNativeProjectedKeyboard(classLoader)
+                            }, 300L)
+                        }
+                    }
+                })
+                log("Hooked demand open k (${method.declaringClass.name})")
+            }.onFailure { log("Failed demand.k: ${it.message}") }
+            return
+        }
         runCatching {
-            val kvl = findGearheadClass(ctx.classLoader, "kvl")
-            val kcw = findGearheadClass(ctx.classLoader, "kcw")
-            HookChains.findAndHookMethod(xposed, kcw, "k", object : MethodHook() {
+            val qfy = findGearheadClass(ctx.classLoader, "qfy")
+            HookChains.findAndHookMethod(xposed, qfy, "k", object : MethodHook() {
                 override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
-                    val trigger = param.args[1] as Int
+                    val trigger = param.args[0] as Int
                     if (trigger != VOICE_SEARCH_TRIGGER_MAPS) return
-                    if (inMapsMicFromHeader()) {
-                        debugEntry("kcw.k() trigger=$trigger — mic passthrough")
-                        return
-                    }
-                    debugEntry("kcw.k() trigger=$trigger — surgical voice block, open native IME")
+                    if (inMapsMicFromHeader()) return
                     markMapsSearchVoiceBlock()
                     closeMapsVoiceDemand(ctx.classLoader)
-                    // Let stock kcw.k proceed so Maps receives search IPC; kxe.* hooks block voice UI.
                 }
 
                 override fun afterHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
-                    val trigger = param.args[1] as Int
+                    val trigger = param.args[0] as Int
                     if (trigger != VOICE_SEARCH_TRIGGER_MAPS) return
-                    if (inMapsMicFromHeader()) return
-                    if (param.hasThrowable()) return
-                    val classLoader = ctx.classLoader
+                    if (inMapsMicFromHeader() || param.hasThrowable()) return
                     runOnMainThread {
                         Handler(Looper.getMainLooper()).postDelayed({
-                            if (inMapsMicFromHeader() || micDictationActive) {
-                                ModuleLog.gearhead("GH-MIC-001", "skip keyboard — mic session active", always = true)
-                                return@postDelayed
-                            }
-                            ModuleLog.gearhead(
-                                "GH-MAPS-001",
-                                "kcw.k($trigger) opening native projected keyboard",
-                                always = true
-                            )
-                            openNativeProjectedKeyboard(classLoader)
+                            openNativeProjectedKeyboard(ctx.classLoader)
                         }, 300L)
                     }
                 }
-            }, kvl, Int::class.javaPrimitiveType!!)
-            log("Hooked kcw.k Maps native keyboard (${kcw.name})")
-        }.onFailure { log("Failed to hook kcw.k Maps native keyboard: ${it.message}") }
+            }, Int::class.javaPrimitiveType!!)
+            log("Hooked fallback qfy.k")
+        }.onFailure { log("Failed fallback qfy.k: ${it.message}") }
     }
 
-    private fun hookQibMicPassthrough(ctx: HookContext) {
-        runCatching {
-            val qib = findGearheadClass(ctx.classLoader, "qib")
-            HookChains.findAndHookMethod(xposed, qib, "l", object : MethodHook() {
-                override fun beforeHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    if (param.args[0] as Int != VOICE_SEARCH_TRIGGER_MAPS) return
-                    micDictationActive = true
-                    mapsMicUntilMs = System.currentTimeMillis() + 4000L
-                    ModuleLog.gearhead("GH-MIC-001", "qib.l(10) mic transcription allowed", always = true)
-                }
+    private fun hookDemandTranscriptionPassthrough(ctx: HookContext) {
+        targets.demandTranscription?.let { method ->
+            runCatching {
+                HookChains.hookMethod(xposed, method, object : MethodHook() {
+                    override fun beforeHookedMethod(param: HookParam) {
+                        if (!ModulePrefs.isEnabled()) return
+                        if (param.args[0] as Int != VOICE_SEARCH_TRIGGER_MAPS) return
+                        micDictationActive = true
+                        mapsMicUntilMs = System.currentTimeMillis() + 4000L
+                        ModuleLog.gearhead("GH-MIC-001", "demand.l(10) mic transcription allowed", always = true)
+                    }
 
-                override fun afterHookedMethod(param: HookParam) {
-                    micDictationActive = false
-                }
-            }, Int::class.javaPrimitiveType!!)
-            log("Hooked qib.l mic passthrough (${qib.name})")
-        }.onFailure { log("Failed to hook qib.l mic passthrough: ${it.message}") }
+                    override fun afterHookedMethod(param: HookParam) {
+                        micDictationActive = false
+                    }
+                })
+                log("Hooked demand transcription l (${method.declaringClass.name})")
+            }.onFailure { log("Failed demand.l: ${it.message}") }
+        }
     }
 
     private fun hookDemandMicBypass(ctx: HookContext) {
-        runCatching {
+        val method = targets.demandOpenCause ?: runCatching {
             val demandService = Reflect.findClass(
                 "com.google.android.gearhead.demand.DemandClientService",
                 ctx.classLoader
             )
-            HookChains.findAndHookMethod(xposed, demandService, "b", object : MethodHook() {
+            demandService.getDeclaredMethod("b", Bundle::class.java).also { it.isAccessible = true }
+        }.getOrNull()
+
+        if (method == null) {
+            log("Failed to hook DemandClientService.b: not found")
+            return
+        }
+        runCatching {
+            HookChains.hookMethod(xposed, method, object : MethodHook() {
                 override fun beforeHookedMethod(param: HookParam) {
                     if (!ModulePrefs.isEnabled()) return
                     val bundle = param.args[0] as? Bundle ?: return
                     signalMapsMicFromDemandBundle(bundle)
                 }
-            }, Bundle::class.java)
+            })
             log("Hooked DemandClientService.b mic detection")
         }.onFailure { log("Failed to hook DemandClientService.b: ${it.message}") }
     }
@@ -722,11 +854,27 @@ object GearheadHooks {
 
     private fun closeMapsVoiceDemand(classLoader: ClassLoader) {
         runCatching {
-            val kcw = findGearheadClass(classLoader, "kcw")
-            val controller = Reflect.callStaticMethod(kcw, "l")
-            val ywj = findGearheadClass(classLoader, "ywj")
-            val interrupted = Reflect.getStaticObjectField(ywj, "INTERRUPTED")
-            Reflect.callMethod(controller, "n", interrupted)
+            val controller = targets.demandOpen?.declaringClass?.let { clazz ->
+                // Prefer live demand controller instance from key.i() / mil when available.
+                runCatching {
+                    val key = findGearheadClass(classLoader, "key")
+                    Reflect.callStaticMethod(key, "i")
+                }.getOrNull()?.takeIf { clazz.isInstance(it) }
+            }
+            val yui = findGearheadClass(classLoader, "yui")
+            val interrupted = Reflect.getStaticObjectField(yui, "INTERRUPTED")
+            if (controller != null) {
+                Reflect.callMethod(controller, "j", interrupted)
+            } else {
+                val qfy = findGearheadClass(classLoader, "qfy")
+                val instance = runCatching {
+                    val key = findGearheadClass(classLoader, "key")
+                    Reflect.callStaticMethod(key, "i")
+                }.getOrNull()
+                if (instance != null && qfy.isInstance(instance)) {
+                    Reflect.callMethod(instance, "j", interrupted)
+                }
+            }
             ModuleLog.gearhead("GH-MAPS-003", "closed demand-space voice for keyboard", always = true)
         }.onFailure {
             ModuleLog.gearhead("GH-MAPS-004", "close demand voice failed: ${it.message}", always = true)
@@ -740,12 +888,12 @@ object GearheadHooks {
             ModuleLog.gearhead("GH-MAPS-002", "broadcast PREPARE_MAPS_NATIVE_IME (before shell)", always = true)
         }
         Handler(Looper.getMainLooper()).postDelayed({
-            if (openProjectedImeViaXcu(classLoader)) {
-                ModuleLog.gearhead("GH-KBD-002", "stock projected keyboard opened via xcu", always = true)
-            } else if (openProjectedImeViaXdb()) {
-                ModuleLog.gearhead("GH-KBD-002", "stock projected keyboard opened via xdb", always = true)
-            } else if (openProjectedImeViaXdl(classLoader)) {
-                ModuleLog.gearhead("GH-KBD-002", "projection keyboard opened via xdl", always = true)
+            if (openProjectedImeViaService(classLoader)) {
+                ModuleLog.gearhead("GH-KBD-002", "stock projected keyboard opened via ime service", always = true)
+            } else if (openProjectedImeViaFragment()) {
+                ModuleLog.gearhead("GH-KBD-002", "stock projected keyboard opened via fragment", always = true)
+            } else if (openProjectedImeViaFactory(classLoader)) {
+                ModuleLog.gearhead("GH-KBD-002", "projection keyboard opened via factory", always = true)
             }
             if (ctx != null) {
                 Handler(Looper.getMainLooper()).postDelayed({
@@ -762,78 +910,92 @@ object GearheadHooks {
 
     private fun resolveGearheadContext(classLoader: ClassLoader): Context? {
         return runCatching {
-            val kcw = findGearheadClass(classLoader, "kcw")
-            val controller = Reflect.callStaticMethod(kcw, "l")
-            Reflect.getObjectField(controller, "d") as Context
+            val key = findGearheadClass(classLoader, "key")
+            val controller = Reflect.callStaticMethod(key, "i")
+            Reflect.getObjectField(controller, "g") as Context
         }.getOrNull() ?: runCatching {
             val atClass = Class.forName("android.app.ActivityThread")
             Reflect.callStaticMethod(atClass, "currentApplication") as Context
         }.getOrNull()
     }
 
-    private fun openProjectedImeViaXcu(classLoader: ClassLoader): Boolean {
-        val ime = activeImeService?.get() ?: findRunningXcuService(classLoader)
+    private fun openProjectedImeViaService(classLoader: ClassLoader): Boolean {
+        val imeClass = targets.imeServiceClass
+        val ime = activeImeService?.get()
+            ?: findRunningImeService(classLoader, imeClass)
         if (ime == null) {
-            ModuleLog.gearhead("GH-MAPS-004", "no xcu IME service in this process", always = true)
+            ModuleLog.gearhead("GH-MAPS-004", "no IME service in this process", always = true)
             return false
         }
         return runCatching {
-            ModuleLog.gearhead("GH-MAPS-002", "attempt projected IME xcu.h()", always = true)
-            prepareXcuForExternalKeyboard(ime)
-            Reflect.callMethod(ime, "h")
+            ModuleLog.gearhead("GH-MAPS-002", "attempt projected IME startExternal()", always = true)
+            prepareImeForExternalKeyboard(ime)
+            val start = targets.imeStartExternal
+            if (start != null) {
+                start.invoke(ime)
+            } else {
+                Reflect.callMethod(ime, "h")
+            }
             isProjectedKeyboardStarted(ime)
         }.getOrElse {
             ModuleLog.gearhead(
                 "GH-MAPS-004",
-                "xcu.h failed: ${it.javaClass.simpleName}: ${it.message}",
+                "ime start failed: ${it.javaClass.simpleName}: ${it.message}",
                 always = true
             )
             false
         }
     }
 
-    private fun openProjectedImeViaXdb(): Boolean {
+    private fun openProjectedImeViaFragment(): Boolean {
         val fragment = activeInputFragment?.get() ?: return false
         return runCatching {
             Reflect.setBooleanField(fragment, "c", false)
             Reflect.callMethod(fragment, "d")
-            ModuleLog.gearhead("GH-MAPS-003", "xdb.d() projection keyboard", always = true)
+            ModuleLog.gearhead("GH-MAPS-003", "fragment.d() projection keyboard", always = true)
             true
         }.getOrElse {
-            ModuleLog.gearhead("GH-MAPS-004", "xdb.d failed: ${it.message}", always = true)
+            ModuleLog.gearhead("GH-MAPS-004", "fragment.d failed: ${it.message}", always = true)
             false
         }
     }
 
-    private fun openProjectedImeViaXdl(classLoader: ClassLoader): Boolean {
+    private fun openProjectedImeViaFactory(classLoader: ClassLoader): Boolean {
         return runCatching {
-            val xdl = findGearheadClass(classLoader, "xdl")
-            val config = runCatching {
-                val xdm = findGearheadClass(classLoader, "xdm")
-                Reflect.callStaticMethod(xdm, "e")
-            }.getOrNull() ?: Reflect.newInstance(xdl)
+            val config = targets.imeUnlockMethods.firstOrNull()?.declaringClass?.let {
+                Reflect.newInstance(it)
+            } ?: runCatching {
+                Reflect.newInstance(findGearheadClass(classLoader, "xbg"))
+            }.getOrNull()
+            if (config == null) return false
             Reflect.setBooleanField(config, "c", false)
             Reflect.callMethod(config, "d")
-            ModuleLog.gearhead("GH-MAPS-003", "xdl/xdu.d() projection keyboard", always = true)
+            ModuleLog.gearhead("GH-MAPS-003", "factory fragment.d() projection keyboard", always = true)
             true
         }.getOrElse {
-            ModuleLog.gearhead("GH-MAPS-004", "xdl.d failed: ${it.javaClass.simpleName}: ${it.message}", always = true)
+            ModuleLog.gearhead(
+                "GH-MAPS-004",
+                "factory.d failed: ${it.javaClass.simpleName}: ${it.message}",
+                always = true
+            )
             false
         }
     }
 
-    private fun findRunningXcuService(classLoader: ClassLoader): Any? {
+    private fun findRunningImeService(classLoader: ClassLoader, imeClass: Class<*>?): Any? {
+        val targetClass = imeClass ?: runCatching {
+            findGearheadClass(classLoader, "xaq")
+        }.getOrNull() ?: return null
         return runCatching {
-            val xcuClass = findGearheadClass(classLoader, "xcu")
             val atClass = Class.forName("android.app.ActivityThread")
             val at = Reflect.callStaticMethod(atClass, "currentActivityThread")
             val services = Reflect.getObjectField(at, "mServices") as? Map<*, *> ?: return null
             for (record in services.values) {
                 val service = Reflect.getObjectField(record, "service") ?: continue
-                if (xcuClass.isInstance(service)) {
+                if (targetClass.isInstance(service)) {
                     ModuleLog.gearhead(
                         "GH-MAPS-000",
-                        "discovered running xcu service via ActivityThread scan",
+                        "discovered running IME service via ActivityThread scan",
                         always = true
                     )
                     return service
@@ -847,7 +1009,7 @@ object GearheadHooks {
         return runCatching { Reflect.getObjectField(ime, "q") != null }.getOrDefault(false)
     }
 
-    private fun prepareXcuForExternalKeyboard(ime: Any) {
+    private fun prepareImeForExternalKeyboard(ime: Any) {
         runCatching {
             val alreadyRunning = Reflect.getObjectField(ime, "q")
             if (Reflect.getBooleanField(ime, "k") && alreadyRunning == null) {
@@ -864,9 +1026,9 @@ object GearheadHooks {
                 Reflect.setObjectField(ime, "h", editorInfo)
             }
             runCatching {
-                val xdb = Reflect.callMethod(ime, "f")
-                if (xdb != null) {
-                    Reflect.setBooleanField(xdb, "c", false)
+                val fragment = Reflect.callMethod(ime, "f")
+                if (fragment != null) {
+                    Reflect.setBooleanField(fragment, "c", false)
                 }
             }
         }

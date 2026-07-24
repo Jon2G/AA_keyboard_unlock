@@ -605,9 +605,9 @@ object MapsHooks {
         }
     }
 
-    /** Trace driving-related resource loads — no string rewrite. */
+    /** Rewrite driving-related resource loads so Maps search shows keyboard hint, not voice-only. */
     private fun hookDrivingResourceTrace(ctx: HookContext) {
-        val traceHook = object : MethodHook() {
+        val rewriteHook = object : MethodHook() {
             override fun beforeHookedMethod(param: HookParam) {
                 if (!hooksActive()) return
                 val resId = param.args[0] as? Int ?: return
@@ -615,7 +615,7 @@ object MapsHooks {
                 ModuleLog.maps(
                     "MAPS-DRIVE-008",
                     "$kind res load caller=${MapsDrivingTrace.formatCallerStack()}",
-                    always = true
+                    always = ModulePrefs.isDebug()
                 )
             }
 
@@ -628,12 +628,26 @@ object MapsHooks {
                     is CharSequence -> result.toString()
                     else -> return
                 }
-                val stack = MapsDrivingTrace.formatCallerStack()
-                ModuleLog.maps(
-                    "MAPS-DRIVE-008",
-                    "$kind resId=$resId text=\"${text.take(50)}\" stack=$stack",
-                    always = true
-                )
+                if (kind == "voiceOnly" || kind == "keyboardDenied") {
+                    val replacement = resolveSearchHintReplacement(param.thisObject)
+                    if (replacement != null && replacement != text) {
+                        param.result = replacement
+                        ModuleLog.maps(
+                            "MAPS-DRIVE-008",
+                            "$kind rewritten \"$text\" -> \"$replacement\"",
+                            always = true
+                        )
+                        return
+                    }
+                }
+                if (ModulePrefs.isDebug()) {
+                    ModuleLog.maps(
+                        "MAPS-DRIVE-008",
+                        "$kind resId=$resId text=\"${text.take(50)}\" " +
+                            "stack=${MapsDrivingTrace.formatCallerStack()}",
+                        always = true
+                    )
+                }
             }
         }
         runCatching {
@@ -641,18 +655,28 @@ object MapsHooks {
                 xposed,
                 android.content.res.Resources::class.java,
                 "getString",
-                traceHook,
+                rewriteHook,
                 Int::class.javaPrimitiveType!!,
             )
             HookChains.findAndHookMethod(
                 xposed,
                 android.content.res.Resources::class.java,
                 "getText",
-                traceHook,
+                rewriteHook,
                 Int::class.javaPrimitiveType!!,
             )
-            log("Hooked Resources.getString/getText driving trace (no rewrite)")
-        }.onFailure { log("Failed to hook Resources driving trace: ${it.message}") }
+            log("Hooked Resources.getString/getText driving rewrite")
+        }.onFailure { log("Failed to hook Resources driving rewrite: ${it.message}") }
+    }
+
+    private fun resolveSearchHintReplacement(resourcesObj: Any?): String? {
+        val searchId = MapsInstallProbe.searchHintResId
+        if (searchId == 0) return "Search"
+        return runCatching {
+            val res = resourcesObj as? android.content.res.Resources
+                ?: return "Search"
+            res.getString(searchId)
+        }.getOrDefault("Search")
     }
 
     private fun tracedDrivingResKind(resId: Int): String? {

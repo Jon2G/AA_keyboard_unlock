@@ -2,11 +2,17 @@ package com.jon2g.aa_keyboard_unlock.hooks
 
 import com.jon2g.aa_keyboard_unlock.ModuleLog
 import com.jon2g.aa_keyboard_unlock.xposed.Reflect
+import java.lang.reflect.Modifier
 
-/** Clear isMicRestricted / isKeyboardRestricted on Maps car search UiState (e.g. qjb). */
+/**
+ * Clear isMicRestricted / isKeyboardRestricted on Maps car search UiState.
+ *
+ * Live Maps 26.30 uses obfuscated final fields (`c` / `d`) with a custom
+ * `UiState(...)` toString — property names are not JVM field names.
+ */
 object MapsCarUiStatePatches {
-    private const val MIC_FIELD = "isMicRestricted"
-    private const val KEYBOARD_FIELD = "isKeyboardRestricted"
+    private const val MIC_FIELD = "c"
+    private const val KEYBOARD_FIELD = "d"
 
     fun looksLikeCarSearchUiState(value: Any): Boolean {
         val text = value.toString()
@@ -28,99 +34,95 @@ object MapsCarUiStatePatches {
     }
 
     /**
-     * Force mic/keyboard restriction flags false. Returns the same instance if fields were
-     * mutated in place, or a copy() result when the data class is immutable.
+     * Force mic/keyboard restriction flags false. Rebuilds via constructor when fields are final.
      */
     fun clearRestrictions(state: Any): Any? {
         if (!looksLikeCarSearchUiState(state)) return null
-        if (patchFieldsInPlace(state)) {
+        if (patchObfuscatedFieldsInPlace(state)) {
             return state
         }
-        return clearRestrictionsViaCopy(state)
+        return rebuildWithRestrictionsCleared(state)
     }
 
-    private fun patchFieldsInPlace(state: Any): Boolean {
+    private fun patchObfuscatedFieldsInPlace(state: Any): Boolean {
         var changed = false
-        runCatching {
-            if (Reflect.getBooleanField(state, MIC_FIELD)) {
-                Reflect.setBooleanField(state, MIC_FIELD, false)
-                changed = true
+        for (name in listOf(MIC_FIELD, KEYBOARD_FIELD)) {
+            runCatching {
+                val field = state.javaClass.getDeclaredField(name)
+                if (field.type != Boolean::class.javaPrimitiveType && field.type != Boolean::class.java) {
+                    return@runCatching
+                }
+                field.isAccessible = true
+                if (Modifier.isFinal(field.modifiers)) {
+                    FieldModifiers.clearFinal(field)
+                }
+                if (field.getBoolean(state)) {
+                    field.setBoolean(state, false)
+                    changed = true
+                }
             }
         }
-        runCatching {
-            if (Reflect.getBooleanField(state, KEYBOARD_FIELD)) {
-                Reflect.setBooleanField(state, KEYBOARD_FIELD, false)
-                changed = true
-            }
-        }
-        if (changed) {
+        if (changed && !isStillRestricted(state)) {
             ModuleLog.maps(
                 "MAPS-DRIVE-012",
-                "UiState in-place: cleared mic/keyboard restrictions on ${state.javaClass.simpleName}",
+                "UiState in-place: cleared c/d restrictions on ${state.javaClass.simpleName}",
                 always = true
             )
+            return true
         }
-        return changed
+        return false
     }
 
-    private fun clearRestrictionsViaCopy(state: Any): Any? {
+    private fun isStillRestricted(state: Any): Boolean {
+        val mic = runCatching { Reflect.getBooleanField(state, MIC_FIELD) }.getOrDefault(false)
+        val kbd = runCatching { Reflect.getBooleanField(state, KEYBOARD_FIELD) }.getOrDefault(false)
+        return mic || kbd
+    }
+
+    private fun rebuildWithRestrictionsCleared(state: Any): Any? {
         val clazz = state.javaClass
-        val components = readComponents(state) ?: return null
-        val micIndex = componentIndexForField(state, components, MIC_FIELD) ?: 3
-        val keyboardIndex = componentIndexForField(state, components, KEYBOARD_FIELD) ?: 4
-        if (micIndex !in components.indices || keyboardIndex !in components.indices) return null
-
-        val patched = components.toMutableList()
-        var changed = false
-        if (patched[micIndex] == true) {
-            patched[micIndex] = false
-            changed = true
-        }
-        if (patched[keyboardIndex] == true) {
-            patched[keyboardIndex] = false
-            changed = true
-        }
-        if (!changed) return null
-
-        val copy = clazz.declaredMethods.firstOrNull { method ->
-            method.name == "copy" && method.parameterCount == patched.size
+        val ctor = clazz.declaredConstructors.firstOrNull { ctor ->
+            val p = ctor.parameterTypes
+            p.size >= 5 &&
+                p[0] == String::class.java &&
+                (p[1] == Int::class.javaPrimitiveType || p[1] == Int::class.java) &&
+                p[2] == String::class.java &&
+                (p[3] == Boolean::class.javaPrimitiveType || p[3] == Boolean::class.java) &&
+                (p[4] == Boolean::class.javaPrimitiveType || p[4] == Boolean::class.java)
         } ?: return null
-        copy.isAccessible = true
-        val result = copy.invoke(state, *patched.toTypedArray()) ?: return null
+
+        val query = runCatching {
+            clazz.getDeclaredField("g").also { it.isAccessible = true }.get(state) as? String
+        }.getOrNull() ?: ""
+        val cursor = runCatching { Reflect.getIntField(state, "a") }.getOrDefault(-1)
+        val hint = runCatching { Reflect.getObjectField(state, "b") as? String }.getOrNull() ?: ""
+        val icon = runCatching { Reflect.getObjectField(state, "e") }.getOrNull()
+        val gemini = runCatching { Reflect.getBooleanField(state, "f") }.getOrDefault(false)
+
+        val mic = runCatching { Reflect.getBooleanField(state, MIC_FIELD) }.getOrDefault(false)
+        val kbd = runCatching { Reflect.getBooleanField(state, KEYBOARD_FIELD) }.getOrDefault(false)
+        if (!mic && !kbd) return null
+
+        ctor.isAccessible = true
+        val params = ctor.parameterTypes
+        val args = arrayOfNulls<Any?>(params.size)
+        args[0] = query
+        args[1] = cursor
+        args[2] = hint
+        args[3] = false // isMicRestricted
+        args[4] = false // isKeyboardRestricted
+        if (params.size > 5) args[5] = icon
+        if (params.size > 6) args[6] = gemini
+        val rebuilt = runCatching { ctor.newInstance(*args) }.getOrNull() ?: return null
         ModuleLog.maps(
             "MAPS-DRIVE-012",
-            "UiState copy(): cleared mic/keyboard restrictions on ${clazz.simpleName}",
+            "UiState rebuild: cleared mic/keyboard restrictions on ${clazz.simpleName}",
             always = true
         )
-        return result
+        return rebuilt
     }
 
-    private fun readComponents(state: Any): List<Any?>? {
-        val clazz = state.javaClass
-        val components = mutableListOf<Any?>()
-        var index = 1
-        while (true) {
-            val component = runCatching {
-                val method = clazz.getDeclaredMethod("component$index")
-                method.isAccessible = true
-                method.invoke(state)
-            }.getOrNull() ?: break
-            components += component
-            index++
-        }
-        return components.takeIf { it.isNotEmpty() }
-    }
-
-    private fun componentIndexForField(
-        state: Any,
-        components: List<Any?>,
-        fieldName: String,
-    ): Int? {
-        val fieldValue = runCatching { Reflect.getBooleanField(state, fieldName) }.getOrNull() ?: return null
-        return components.indices.firstOrNull { components[it] == fieldValue }
-    }
-
-    /** qjb-style ctor: String, int, String, bool mic, bool keyboard, … */
+    /** qjb/qnp-style ctor: String, int, String, bool mic, bool keyboard, … */
     fun isCarSearchUiStateConstructor(parameterTypes: Array<Class<*>>): Boolean {
         if (parameterTypes.size < 5) return false
         val booleanPrimitive = Boolean::class.javaPrimitiveType!!
@@ -142,5 +144,19 @@ object MapsCarUiStatePatches {
             forced++
         }
         return forced
+    }
+
+    /** Access java.lang.reflect.Field#modifiers when present (pre-Java 12 style). */
+    private object FieldModifiers {
+        private val modifiersField = runCatching {
+            java.lang.reflect.Field::class.java.getDeclaredField("modifiers").also {
+                it.isAccessible = true
+            }
+        }.getOrNull()
+
+        fun clearFinal(field: java.lang.reflect.Field) {
+            val mods = modifiersField ?: return
+            runCatching { mods.setInt(field, field.modifiers and Modifier.FINAL.inv()) }
+        }
     }
 }
