@@ -29,15 +29,22 @@ object DexHooks {
                     val bytes = zip.getInputStream(zip.getEntry(dexName)).readBytes()
                     val text = bytes.decodeToString()
                     for (needle in needles) {
-                        if (!text.contains(needle)) continue
-                        val classHits = Regex("""Ldefpackage/([a-z]{2,4});""")
-                            .findAll(text)
-                            .map { it.groupValues[1] }
-                            .distinct()
-                            .take(limit)
-                        for (shortName in classHits) {
-                            hits += "defpackage.$shortName" to needle
-                            if (hits.size >= limit) return hits
+                        var from = 0
+                        while (hits.size < limit) {
+                            val idx = text.indexOf(needle, from)
+                            if (idx < 0) break
+                            val start = (idx - 4000).coerceAtLeast(0)
+                            val end = (idx + needle.length + 4000).coerceAtMost(text.length)
+                            val window = text.substring(start, end)
+                            Regex("""L(?:defpackage/)?([a-z]{2,5});""")
+                                .findAll(window)
+                                .map { it.groupValues[1] }
+                                .distinct()
+                                .forEach { shortName ->
+                                    if (hits.size >= limit) return hits
+                                    hits += "defpackage.$shortName" to needle
+                                }
+                            from = idx + needle.length
                         }
                     }
                 }

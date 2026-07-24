@@ -612,8 +612,9 @@ object GearheadSignatureDiscovery {
     }
 
     /**
-     * Resolve critical targets via stable FQCNs / known short names before loose heuristics.
-     * Prevents matching unrelated classes that happen to have F(int) or k(int).
+     * Resolve critical targets via stable FQCNs / known short-name **seeds** before loose heuristics.
+     * Seeds are validated by API shape ([isSensorCallback], [isVoiceControllerClass], etc.) — they are
+     * not permanent remaps. When [isAnchorComplete] the full dex walk is skipped.
      */
     private fun resolveAnchors(
         classLoader: ClassLoader,

@@ -9,6 +9,29 @@ All notable changes to this project are documented here.
 - In-app updates from GitHub Releases — auto-check when opening settings, manual **Check for updates**, download and install via system package installer
 - About section on settings screen — app version, author, GitHub link, MIT license
 
+## [2.1.0] - 2026-07-24
+
+Android Auto **17.3** + Maps **26.30** keyboard unlock: signature/anchor discovery, no hard-coded remaps as the source of truth.
+
+### Added
+
+- **`DiscoveryCache`** — versioned persistence of resolved Gearhead/Maps hook descriptors keyed by `package@longVersionCode` (schema v2)
+- **`GearheadSignatureDiscovery`** — FQCN + shape anchors (`TouchInputMethodService`, `VoiceSessionConfig`, `DemandClientService`, `CAR_PARKED`) with short-name **seeds** validated by API shape; skips full dex walk when anchors complete
+- Maps search tap / voice-only path hooks driven by **discovered signatures** (`hintMethods`, `searchHeaderTaps`, UiState ctor shape, `isMicRestricted=` toString) — not fixed R8 class names
+
+### Fixed
+
+- Android Auto **17.3** `ClassNotFound` on legacy short names (`xdl`/`kcw`/`kxe`/…) — discovery replaces permanent remaps
+- Discovery false positives (`aemn`/`ajjr`) and hung full-dex scan after anchors — anchor-first + early complete
+- Maps drive-mode search bar **no-op** when mic+keyboard restricted (`qnu.l`-shaped path) — open rek keyboard via discovered header taps; clear UiState restrictions via toString/ctor rebuild
+- Maps **"Can't use keyboard while driving"** / voice-only label — resource + hint-gate rewrite; UiState mic/keyboard flags cleared without field-letter hardcoding
+- External AA apps **"Park to use the keyboard"** — parking/location/IME hooks install again after discovery completes
+
+### Changed
+
+- Release path stays **silent** (`MODULE_DEBUG=false`); use `-log` / debug APK for LSPosed traces
+- Gearhead short names remain **seed/fallback only**; runtime hooks prefer cached descriptors and FQCN anchors
+
 ## [2.0.1] - 2026-06-19
 
 Bugfix release: phone Google Maps no longer crashes when adding a place to a list while the module is enabled.

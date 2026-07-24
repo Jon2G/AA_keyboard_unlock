@@ -190,7 +190,8 @@ object MapsInstallProbe {
         if (!Modifier.isStatic(method.modifiers)) return false
         if (method.returnType != String::class.java) return false
         val params = method.parameterTypes
-        if (params.isEmpty() || params[0] != Context::class.java) return false
+        // Compare by name: Context::class.java is the module loader; method params are app loader.
+        if (params.isEmpty() || params[0].name != Context::class.java.name) return false
         val booleanPrimitive = Boolean::class.javaPrimitiveType!!
         return params.count { it == booleanPrimitive || it == Boolean::class.java } >= 2
     }

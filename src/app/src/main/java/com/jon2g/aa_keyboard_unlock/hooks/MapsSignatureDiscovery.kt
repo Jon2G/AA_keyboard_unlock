@@ -3,11 +3,15 @@ package com.jon2g.aa_keyboard_unlock.hooks
 import android.content.Context
 import android.view.View
 import com.jon2g.aa_keyboard_unlock.ModuleLog
+import com.jon2g.aa_keyboard_unlock.xposed.DexHooks
 import com.jon2g.aa_keyboard_unlock.xposed.HookContext
+import com.jon2g.aa_keyboard_unlock.xposed.Reflect
 import dalvik.system.DexFile
+import java.io.File
 import java.lang.reflect.Constructor
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
+import java.util.zip.ZipFile
 
 /**
  * Find Maps Car keyboard / driving-detection types by API shape, not obfuscated short names.
@@ -46,6 +50,8 @@ object MapsSignatureDiscovery {
         val keyboardRestrictedMethods: List<Method> = emptyList(),
         val voiceBypassMethods: List<Method> = emptyList(),
         val headerRestrictionConstructors: List<Constructor<*>> = emptyList(),
+        /** Car search HeaderViewModel UiState types (isMicRestricted/isKeyboardRestricted ctor). */
+        val uiStateTypes: List<Class<*>> = emptyList(),
         val stats: ScanStats = ScanStats(),
         val fromCache: Boolean = false,
     ) {
@@ -69,6 +75,7 @@ object MapsSignatureDiscovery {
             headerRestrictionConstructors.forEach {
                 members += DiscoveryCache.ctorRef(it, "header_restrict_ctor")
             }
+            uiStateTypes.forEach { members += DiscoveryCache.classRef(it, "ui_state") }
             return DiscoveryCache.CachePayload(members)
         }
     }
@@ -184,6 +191,7 @@ object MapsSignatureDiscovery {
             headerRestrictionConstructors = payload.members
                 .filter { it.tag == "header_restrict_ctor" }
                 .mapNotNull { DiscoveryCache.resolveConstructor(classLoader, it) },
+            uiStateTypes = classes("ui_state"),
             stats = ScanStats(),
             fromCache = true,
         )
@@ -200,6 +208,7 @@ object MapsSignatureDiscovery {
         val restrictedMethods = linkedSetOf<Method>()
         val voiceMethods = linkedSetOf<Method>()
         val headerCtors = linkedSetOf<Constructor<*>>()
+        val uiStateTypes = linkedSetOf<Class<*>>()
         val seen = mutableSetOf<String>()
 
         val paths = ctx.sourcePaths.ifEmpty { listOf(ctx.sourcePath) }
@@ -212,16 +221,17 @@ object MapsSignatureDiscovery {
 
         val entrySamples = mutableListOf<String>()
 
-        for (path in paths) {
-            if (!apkContainsDex(path)) {
-                stats.dexOpenFailures++
-                if (stats.firstDexError == null) {
-                    stats.firstDexError = "${path.substringAfterLast('/')}: no classes.dex"
-                }
-                continue
-            }
+        // Prefer ClassLoader dexElements (all multidex already mapped). DexFile(apkPath) often
+        // only enumerates classes.dex and misses UiState/controllers in classes5+.
+        val dexFiles = collectDexFiles(ctx.classLoader, paths)
+        ModuleLog.maps(
+            "MAPS-DRIVE-010",
+            "dex sources=${dexFiles.size} (classLoader+apk multidex)",
+            always = true
+        )
+
+        for ((label, dex) in dexFiles) {
             runCatching {
-                val dex = DexFile(path)
                 val entries = dex.entries()
                 while (entries.hasMoreElements()) {
                     val rawName = entries.nextElement()
@@ -247,35 +257,53 @@ object MapsSignatureDiscovery {
                         if (clazz.isInterface || isCoroutineLike(clazz)) {
                             stats.coroutineSkipped++
                         } else {
-                            inspectClass(
-                                clazz,
-                                hints,
-                                rekTypes,
-                                rekLooseTypes,
-                                carImeTypes,
-                                headerTaps,
-                                carParamMethods,
-                                restrictedMethods,
-                                voiceMethods,
-                                headerCtors,
-                                stats,
-                            )
+                            runCatching {
+                                inspectClass(
+                                    clazz,
+                                    hints,
+                                    rekTypes,
+                                    rekLooseTypes,
+                                    carImeTypes,
+                                    headerTaps,
+                                    carParamMethods,
+                                    restrictedMethods,
+                                    voiceMethods,
+                                    headerCtors,
+                                    uiStateTypes,
+                                    stats,
+                                )
+                            }.onFailure { error ->
+                                if (stats.firstLoadError == null) {
+                                    stats.firstLoadError =
+                                        "inspect ${clazz.simpleName}: ${error.javaClass.simpleName}: ${error.message}"
+                                }
+                            }
                         }
                     }
                 }
             }.onFailure { error ->
                 stats.dexOpenFailures++
                 if (stats.firstDexError == null) {
-                    stats.firstDexError = "${path.substringAfterLast('/')}: ${error.message}"
+                    stats.firstDexError = "$label: ${error.message}"
                 }
             }
+        }
+
+        if (uiStateTypes.isEmpty()) {
+            resolveUiStateViaStringAnchor(ctx, paths, uiStateTypes, headerTaps)
         }
 
         val allRek = linkedSetOf<Class<*>>()
         allRek += rekTypes
         allRek += rekLooseTypes
 
-        val carGraph = buildCarGraphClasses(headerTaps, allRek, carImeTypes)
+        // Prefer controllers that hold car-search UiState (qnu-shaped) over generic
+        // l()+rek false positives (aaca-shaped). rkw is an interface without View anchors.
+        val rankedHeaderTaps = headerTaps
+            .sortedByDescending { scoreSearchHeaderTap(it, uiStateTypes) }
+            .take(8)
+
+        val carGraph = buildCarGraphClasses(rankedHeaderTaps, allRek, carImeTypes)
 
         logScanStats(stats, entrySamples)
 
@@ -286,9 +314,7 @@ object MapsSignatureDiscovery {
                 .take(16),
             rekOverlayTypes = allRek.sortedByDescending { scoreRekType(it) }.take(20),
             carImeTypes = carImeTypes.sortedBy { it.name }.take(10),
-            searchHeaderTaps = headerTaps
-                .sortedByDescending { scoreSearchHeaderTap(it) }
-                .take(4),
+            searchHeaderTaps = rankedHeaderTaps,
             carParameterMethods = carParamMethods
                 .distinctBy { "${it.declaringClass.name}#${it.name}" }
                 .sortedByDescending { scoreCarParamsMethod(it) }
@@ -300,7 +326,11 @@ object MapsSignatureDiscovery {
             voiceBypassMethods = voiceMethods
                 .sortedByDescending { scoreVoiceBypassMethod(it) }
                 .take(12),
-            headerRestrictionConstructors = headerCtors.take(24),
+            headerRestrictionConstructors = headerCtors
+                .filter { MapsCarUiStatePatches.isCarSearchUiStateConstructor(it.parameterTypes) }
+                .ifEmpty { headerCtors.take(24) }
+                .take(24),
+            uiStateTypes = uiStateTypes.sortedBy { it.name }.take(8),
             stats = stats,
             fromCache = false,
         )
@@ -317,6 +347,7 @@ object MapsSignatureDiscovery {
         restrictedMethods: MutableSet<Method>,
         voiceMethods: MutableSet<Method>,
         headerCtors: MutableSet<Constructor<*>>,
+        uiStateTypes: MutableSet<Class<*>>,
         stats: ScanStats,
     ) {
         for (method in clazz.declaredMethods) {
@@ -358,6 +389,15 @@ object MapsSignatureDiscovery {
             if (hasTapMethodWithoutRek(clazz)) stats.nearHeaderTap++
         }
 
+        for (ctor in clazz.declaredConstructors) {
+            if (MapsCarUiStatePatches.isCarSearchUiStateConstructor(ctor.parameterTypes)) {
+                uiStateTypes += clazz
+                headerCtors += ctor
+            } else if (isHeaderRestrictionConstructor(ctor)) {
+                headerCtors += ctor
+            }
+        }
+
         for (method in clazz.declaredMethods) {
             if (Modifier.isStatic(method.modifiers)) continue
             if (method.parameterCount == 0 && isCarParamsType(method.returnType)) {
@@ -369,12 +409,6 @@ object MapsSignatureDiscovery {
             }
             if (isVoiceBypassMethod(method, clazz)) {
                 voiceMethods += method
-            }
-        }
-
-        for (ctor in clazz.declaredConstructors) {
-            if (isHeaderRestrictionConstructor(ctor)) {
-                headerCtors += ctor
             }
         }
     }
@@ -391,8 +425,139 @@ object MapsSignatureDiscovery {
     private fun apkContainsDex(path: String): Boolean {
         if (!path.endsWith(".apk")) return true
         return runCatching {
-            java.util.zip.ZipFile(path).use { zip -> zip.getEntry("classes.dex") != null }
+            ZipFile(path).use { zip -> zip.getEntry("classes.dex") != null }
         }.getOrDefault(true)
+    }
+
+    /**
+     * All DexFile instances we can enumerate: ClassLoader pathList first (multidex), then
+     * each classes*.dex extracted from APK zips as fallback.
+     */
+    private fun collectDexFiles(
+        classLoader: ClassLoader,
+        apkPaths: List<String>,
+    ): List<Pair<String, DexFile>> {
+        val out = mutableListOf<Pair<String, DexFile>>()
+        val seen = mutableSetOf<Int>()
+
+        fun add(label: String, dex: DexFile?) {
+            if (dex == null) return
+            val id = System.identityHashCode(dex)
+            if (!seen.add(id)) return
+            out += label to dex
+        }
+
+        runCatching {
+            val pathListField = Class.forName("dalvik.system.BaseDexClassLoader")
+                .getDeclaredField("pathList")
+                .also { it.isAccessible = true }
+            val dexElementsField = Class.forName("dalvik.system.DexPathList")
+                .getDeclaredField("dexElements")
+                .also { it.isAccessible = true }
+            val dexFileField = Class.forName("dalvik.system.DexPathList\$Element")
+                .getDeclaredField("dexFile")
+                .also { it.isAccessible = true }
+
+            var loader: ClassLoader? = classLoader
+            while (loader != null) {
+                if (Class.forName("dalvik.system.BaseDexClassLoader").isInstance(loader)) {
+                    val pathList = pathListField.get(loader)
+                    val elements = dexElementsField.get(pathList) as? Array<*>
+                    if (elements != null) {
+                        for ((index, element) in elements.withIndex()) {
+                            if (element == null) continue
+                            add(
+                                "cl#${loader.javaClass.simpleName}[$index]",
+                                dexFileField.get(element) as? DexFile,
+                            )
+                        }
+                    }
+                }
+                loader = loader.parent
+            }
+        }
+
+        if (out.isNotEmpty()) return out
+
+        val cacheDir = runCatching {
+            Reflect.callStaticMethod(
+                Class.forName("android.app.ActivityThread"),
+                "currentApplication",
+            )?.let { app ->
+                Reflect.callMethod(app, "getCodeCacheDir") as? File
+            }
+        }.getOrNull() ?: return out
+
+        val dexCache = File(cacheDir, "aa_ku_maps_dex").apply { mkdirs() }
+        for (path in apkPaths) {
+            if (!path.endsWith(".apk") || !apkContainsDex(path)) continue
+            runCatching {
+                ZipFile(path).use { zip ->
+                    val dexNames = zip.entries().asSequence()
+                        .map { it.name }
+                        .filter { it == "classes.dex" || it.matches(Regex("""classes\d+\.dex""")) }
+                        .toList()
+                    for (dexName in dexNames) {
+                        val entry = zip.getEntry(dexName) ?: continue
+                        val outFile = File(dexCache, "${File(path).name}_$dexName")
+                        if (!outFile.exists() || outFile.length() != entry.size) {
+                            zip.getInputStream(entry).use { input ->
+                                outFile.outputStream().use { input.copyTo(it) }
+                            }
+                        }
+                        add("${File(path).name}/$dexName", DexFile(outFile.absolutePath))
+                    }
+                }
+            }.onFailure {
+                // fall through — caller records dex open failures when enumerating
+            }
+        }
+        return out
+    }
+
+    /**
+     * Fallback when multidex scan still missed UiState: find classes near the
+     * `isMicRestricted=` toString constant, validate ctor shape, then attach header taps.
+     */
+    private fun resolveUiStateViaStringAnchor(
+        ctx: HookContext,
+        paths: List<String>,
+        uiStateTypes: MutableSet<Class<*>>,
+        headerTaps: MutableSet<SearchHeaderTap>,
+    ) {
+        val needles = listOf("isMicRestricted=", "isKeyboardRestricted=")
+        val candidates = linkedSetOf<String>()
+        for (path in paths) {
+            DexHooks.findClassesReferencingStrings(path, needles, limit = 120).forEach { (name, _) ->
+                candidates += name
+                candidates += name.substringAfterLast('.')
+            }
+        }
+        for (name in candidates) {
+            val clazz = loadObfuscatedClass(ctx.classLoader, name) ?: continue
+            if (clazz.isInterface || isCoroutineLike(clazz)) continue
+            runCatching {
+                val isUi = clazz.declaredConstructors.any {
+                    MapsCarUiStatePatches.isCarSearchUiStateConstructor(it.parameterTypes)
+                }
+                if (isUi) uiStateTypes += clazz
+                findSearchHeaderTap(clazz)?.let { headerTaps += it }
+            }
+        }
+        if (uiStateTypes.isEmpty()) {
+            ModuleLog.maps(
+                "MAPS-DRIVE-010",
+                "WARN UiState string-anchor miss candidates=${candidates.size}",
+                always = true
+            )
+            return
+        }
+        ModuleLog.maps(
+            "MAPS-DRIVE-010",
+            "UiState via string-anchor x${uiStateTypes.size}: " +
+                uiStateTypes.joinToString { it.simpleName },
+            always = true
+        )
     }
 
     private fun logScanStats(stats: ScanStats, entrySamples: List<String>) {
@@ -467,7 +632,8 @@ object MapsSignatureDiscovery {
             "signature scan hint=${targets.hintMethods.size} rek=${targets.rekOverlayTypes.size} " +
                 "ime=${targets.carImeTypes.size} headerTap=${targets.searchHeaderTaps.size} " +
                 "carParams=${targets.carParameterMethods.size} restricted=${targets.keyboardRestrictedMethods.size} " +
-                "voiceBypass=${targets.voiceBypassMethods.size} headerCtor=${targets.headerRestrictionConstructors.size}",
+                "voiceBypass=${targets.voiceBypassMethods.size} headerCtor=${targets.headerRestrictionConstructors.size} " +
+                "uiState=${targets.uiStateTypes.size}",
             always = true
         )
         if (targets.hintMethods.isNotEmpty()) {
@@ -477,10 +643,17 @@ object MapsSignatureDiscovery {
                 always = true
             )
         }
+        if (targets.uiStateTypes.isNotEmpty()) {
+            ModuleLog.maps(
+                "MAPS-DRIVE-011",
+                "uiState types: " + targets.uiStateTypes.joinToString { it.simpleName },
+                always = true
+            )
+        }
         if (targets.searchHeaderTaps.isNotEmpty()) {
             ModuleLog.maps(
                 "MAPS-DRIVE-011",
-                "search header taps: " + targets.searchHeaderTaps.take(4).joinToString {
+                "search header taps: " + targets.searchHeaderTaps.take(8).joinToString {
                     "${it.headerClass.simpleName}.${it.tapMethod.name}() rekField=${it.rekFieldName}"
                 },
                 always = true
@@ -585,6 +758,8 @@ object MapsSignatureDiscovery {
             !Modifier.isStatic(field.modifiers) && isRekOverlayTypeStrict(field.type)
         } ?: clazz.declaredFields.firstOrNull { field ->
             !Modifier.isStatic(field.modifiers) && isRekOverlayTypeLoose(field.type)
+        } ?: clazz.declaredFields.firstOrNull { field ->
+            !Modifier.isStatic(field.modifiers) && MapsInstallProbe.isRekLikeType(field.type)
         } ?: return null
 
         return SearchHeaderTap(clazz, tapMethod, rekField.name)
@@ -666,12 +841,64 @@ object MapsSignatureDiscovery {
         }
     }
 
-    private fun scoreSearchHeaderTap(tap: SearchHeaderTap): Int {
+    private fun scoreSearchHeaderTap(
+        tap: SearchHeaderTap,
+        uiStateTypes: Set<Class<*>>,
+    ): Int {
         var score = 0
-        val rekType = tap.headerClass.declaredFields.firstOrNull { it.name == tap.rekFieldName }?.type
-        if (rekType != null && isRekOverlayTypeStrict(rekType)) score += 10
-        if (tap.headerClass.declaredFields.any { isRekOverlayTypeStrict(it.type) }) score += 5
+        val header = tap.headerClass
+        val rekType = header.declaredFields.firstOrNull { it.name == tap.rekFieldName }?.type
+
+        // Real destination-search controller holds HeaderViewModel UiState (qnp-shaped).
+        if (uiStateTypes.isNotEmpty() && headerHoldsUiState(header, uiStateTypes)) {
+            score += 100
+        }
+
+        // rkw-shaped keyboard opener is often an interface (d + e(...)) without View anchors.
+        if (rekType != null) {
+            when {
+                isRekOverlayTypeStrict(rekType) -> score += 10
+                isRekOverlayTypeLoose(rekType) -> score += 8
+                MapsInstallProbe.isRekLikeType(rekType) -> score += 12
+            }
+            if (rekType.isInterface) score += 15
+        }
+
+        // qnu implements a rich header interface (qnq) and takes Context in a ctor.
+        if (header.interfaces.any { iface ->
+                walkMethods(iface).count { it.name == "l" && it.parameterCount == 0 } > 0 &&
+                    iface.declaredMethods.size >= 8
+            }
+        ) {
+            score += 25
+        }
+        if (header.declaredConstructors.any { ctor ->
+                ctor.parameterTypes.any { it.name == Context::class.java.name }
+            }
+        ) {
+            score += 10
+        }
+
+        // Prefer fewer fields than sprawling UI glue classes when scores otherwise tie.
+        val instanceFields = header.declaredFields.count { !Modifier.isStatic(it.modifiers) }
+        if (instanceFields in 8..30) score += 5
+
         return score
+    }
+
+    private fun headerHoldsUiState(header: Class<*>, uiStateTypes: Set<Class<*>>): Boolean {
+        for (field in header.declaredFields) {
+            if (Modifier.isStatic(field.modifiers)) continue
+            if (field.type in uiStateTypes) return true
+        }
+        for (ctor in header.declaredConstructors) {
+            if (ctor.parameterTypes.any { it in uiStateTypes }) return true
+        }
+        for (method in header.declaredMethods) {
+            if (method.returnType in uiStateTypes) return true
+            if (method.parameterTypes.any { it in uiStateTypes }) return true
+        }
+        return false
     }
 
     private fun isVoiceBypassMethod(method: Method, clazz: Class<*>): Boolean {
@@ -723,7 +950,7 @@ object MapsSignatureDiscovery {
         if (MapsInstallProbe.isHintCandidateStrict(method)) score += 10
         if (params.size == 7) score += 10
         if (params.size >= 5) score += 5
-        if (params.firstOrNull() == Context::class.java) score += 5
+        if (params.firstOrNull()?.name == Context::class.java.name) score += 5
         val bools = params.count { it == Boolean::class.javaPrimitiveType || it == Boolean::class.java }
         score += bools * 2
         if (method.name == "aJ") score += 3

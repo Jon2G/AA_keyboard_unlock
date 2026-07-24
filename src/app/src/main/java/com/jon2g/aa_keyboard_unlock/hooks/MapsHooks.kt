@@ -159,7 +159,7 @@ object MapsHooks {
     }
 
     private fun hookVoiceOnlyPath(ctx: HookContext) {
-        val hooked = MapsVoiceOnlyPathHooks.install(xposed, ctx.classLoader)
+        val hooked = MapsVoiceOnlyPathHooks.install(xposed, ctx.classLoader, targets)
         installAudit.voiceOnlyPathHooks = hooked
     }
 
