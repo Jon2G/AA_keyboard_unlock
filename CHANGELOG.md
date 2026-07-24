@@ -4,14 +4,9 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
-### Added
-
-- In-app updates from GitHub Releases — auto-check when opening settings, manual **Check for updates**, download and install via system package installer
-- About section on settings screen — app version, author, GitHub link, MIT license
-
 ## [2.1.0] - 2026-07-24
 
-Android Auto **17.3** + Maps **26.30** keyboard unlock: signature/anchor discovery is the source of truth; short names are probes only and rejected unless API shape matches.
+Android Auto **17.3** + Maps **26.30** keyboard unlock: signature/anchor discovery is the source of truth; short names are discovery probes only and rejected unless API shape matches. Hook layers consume **discovered targets only**.
 
 ### Added
 
@@ -20,6 +15,8 @@ Android Auto **17.3** + Maps **26.30** keyboard unlock: signature/anchor discove
 - **`MapsSignatureDiscovery`** — multidex ClassLoader scan, string anchors (`isMicRestricted=`), UiState ctor shape, header-tap scoring that prefers controllers holding car-search UiState; shape-validated fallbacks only when scan leaves a gap
 - **`MapsCarUiStatePatches`** — clear mic/keyboard restrictions via UiState toString/ctor rebuild (no field-letter hardcoding)
 - Maps voice-only path hooks consume **discovered targets only** (no short names in the hook layer)
+- In-app updates from GitHub Releases — auto-check when opening settings, manual **Check for updates**, download and install via system package installer
+- About section on settings screen — app version, author, GitHub link, MIT license
 
 ### Fixed
 
@@ -27,6 +24,7 @@ Android Auto **17.3** + Maps **26.30** keyboard unlock: signature/anchor discove
 - Discovery false positives (`aemn`/`ajjr`) and hung full-dex scan after anchors — anchor-first + early complete
 - Maps dex scan missing car-search types in secondary dexes — enumerate ClassLoader `dexElements` (not `DexFile(apk)` primary dex only)
 - Maps drive-mode search opening **voice dictation** instead of QWERTY — force rek keyboard open on shape-validated header taps; clear UiState restrictions; driving hint-gate bool forced false
+- Maps car-search tap showing caret but **no keyboard** (including when parked) — bind-only `rek.d()` path; skip speculative `reh.b()` overlay show that broke IME
 - Maps **"Can't use keyboard while driving"** / voice-only label — resource + hint-gate rewrite
 - External AA apps **"Park to use the keyboard"** — parking/location/IME hooks install again after discovery completes
 - Voice-only install aborting on missing XR classes (`NoClassDefFoundError`) — per-step isolation so one bad type cannot skip keyboard hooks
@@ -34,8 +32,9 @@ Android Auto **17.3** + Maps **26.30** keyboard unlock: signature/anchor discove
 ### Changed
 
 - Release path stays **silent** (`MODULE_DEBUG=false`); use `-log` / debug APK for LSPosed traces
-- Gearhead/Maps short names remain **seed/fallback only**; runtime hooks prefer cached descriptors, FQCN anchors, and shape matches
+- Gearhead/Maps short names remain **discovery seed/probe only**; hook install no longer falls back to hardcoded obfuscated class names when discovery misses — log and skip instead
 - Unit/`done` return values resolved from the hooked method's return type (singleton static field), not a fixed class name
+- Demand voice interrupt / Gearhead context resolution use discovered types + stable Android APIs (`ActivityThread`), not short-name helpers
 
 ## [2.0.1] - 2026-06-19
 

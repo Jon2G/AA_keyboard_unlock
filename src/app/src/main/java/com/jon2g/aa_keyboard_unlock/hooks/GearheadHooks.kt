@@ -25,7 +25,6 @@ import java.lang.reflect.Modifier
 object GearheadHooks {
     private const val SENSOR_TYPE_CAR_SPEED = 2
     private const val SENSOR_TYPE_DRIVING_STATUS = 11
-    private const val LHA_FIELD_CAR_PARKED = "b"
     private const val VOICE_SEARCH_TRIGGER_MAPS = 10
     private const val VOICE_SESSION_TYPE_VOICE = 1
     private const val VOICE_SESSION_TYPE_DIRECT_REPLY = 2
@@ -85,15 +84,6 @@ object GearheadHooks {
         )
     }
 
-    private fun findGearheadClass(classLoader: ClassLoader, shortName: String): Class<*> {
-        for (name in listOf(shortName, "defpackage.$shortName")) {
-            runCatching {
-                return Reflect.findClass(name, classLoader)
-            }
-        }
-        throw ClassNotFoundException(shortName)
-    }
-
     private val sensorSpoofHook = object : MethodHook() {
         override fun beforeHookedMethod(param: HookParam) {
             if (!ModulePrefs.isEnabled()) return
@@ -141,15 +131,7 @@ object GearheadHooks {
             }
             return
         }
-        // Legacy short-name fallback (pre-discovery / cache miss)
-        for (shortName in listOf("lhl", "lhv", "lhk", "lhu")) {
-            runCatching {
-                val clazz = findGearheadClass(ctx.classLoader, shortName)
-                if (clazz.isInterface || Modifier.isAbstract(clazz.modifiers)) return@runCatching
-                HookChains.hookAllMethods(xposed, clazz, "d", sensorSpoofHook)
-                log("Hooked fallback $shortName.d (${clazz.name})")
-            }.onFailure { log("Failed fallback $shortName.d: ${it.message}") }
-        }
+        log("WARN no discovered sensor callbacks — skip sensor spoof hooks")
     }
 
     private fun hookLocationManager(ctx: HookContext) {
@@ -170,19 +152,7 @@ object GearheadHooks {
                 log("Hooked location q (${q.declaringClass.name})")
             }.onFailure { log("Failed loc.q: ${it.message}") }
         } else {
-            runCatching {
-                val lhu = findGearheadClass(ctx.classLoader, "lhu")
-                HookChains.findAndHookMethod(xposed, lhu, "q", object : MethodHook() {
-                    override fun afterHookedMethod(param: HookParam) {
-                        if (!ModulePrefs.isEnabled()) return
-                        if (param.result != true) {
-                            debug("lhu.q() forced true (was ${param.result})")
-                            param.result = true
-                        }
-                    }
-                })
-                log("Hooked fallback lhu.q")
-            }.onFailure { log("Failed fallback lhu.q: ${it.message}") }
+            log("WARN no discovered locationKeyboardEnabled")
         }
 
         if (s != null) {
@@ -199,19 +169,7 @@ object GearheadHooks {
                 log("Hooked location s (${s.declaringClass.name})")
             }.onFailure { log("Failed loc.s: ${it.message}") }
         } else {
-            runCatching {
-                val lhu = findGearheadClass(ctx.classLoader, "lhu")
-                HookChains.findAndHookMethod(xposed, lhu, "s", object : MethodHook() {
-                    override fun afterHookedMethod(param: HookParam) {
-                        if (!ModulePrefs.isEnabled()) return
-                        if (param.result != false) {
-                            debug("lhu.s() forced false (was ${param.result})")
-                            param.result = false
-                        }
-                    }
-                })
-                log("Hooked fallback lhu.s")
-            }.onFailure { log("Failed fallback lhu.s: ${it.message}") }
+            log("WARN no discovered locationWheelSpeedNonZero")
         }
 
         if (f != null) {
@@ -248,21 +206,7 @@ object GearheadHooks {
                 log("Hooked location parking c (${parking.declaringClass.name})")
             }.onFailure { log("Failed loc.c: ${it.message}") }
         } else {
-            runCatching {
-                val lhu = findGearheadClass(ctx.classLoader, "lhu")
-                val lhb = findGearheadClass(ctx.classLoader, "lhb")
-                val parked = Reflect.getStaticObjectField(lhb, LHA_FIELD_CAR_PARKED)
-                HookChains.findAndHookMethod(xposed, lhu, "c", object : MethodHook() {
-                    override fun afterHookedMethod(param: HookParam) {
-                        if (!ModulePrefs.isEnabled()) return
-                        if (param.result != parked) {
-                            debug("lhu.c() forced CAR_PARKED (was ${param.result})")
-                            param.result = parked
-                        }
-                    }
-                })
-                log("Hooked fallback lhu.c")
-            }.onFailure { log("Failed fallback lhu.c: ${it.message}") }
+            log("WARN no discovered locationParkingState / parking enum")
         }
 
         targets.assistantKeyboardEnabled?.let { method ->
@@ -321,21 +265,7 @@ object GearheadHooks {
             }
             return
         }
-        runCatching {
-            val jqt = findGearheadClass(ctx.classLoader, "jqt")
-            for (method in listOf("a", "b")) {
-                HookChains.findAndHookMethod(xposed, jqt, method, object : MethodHook() {
-                    override fun afterHookedMethod(param: HookParam) {
-                        if (!ModulePrefs.isEnabled()) return
-                        if (param.result == true) {
-                            debug("jqt.$method() forced false (was true)")
-                            param.result = false
-                        }
-                    }
-                })
-            }
-            log("Hooked fallback jqt.a/b")
-        }.onFailure { log("Failed fallback jqt: ${it.message}") }
+        log("WARN no discovered carUi touchscreen/touchpad methods")
     }
 
     private fun hookCarAppKeyboardGate(ctx: HookContext) {
@@ -356,19 +286,7 @@ object GearheadHooks {
                 })
                 log("Hooked carApp blocked (${method.declaringClass.name})")
             }.onFailure { log("Failed carApp blocked: ${it.message}") }
-        } ?: runCatching {
-            val juv = findGearheadClass(ctx.classLoader, "juv")
-            HookChains.findAndHookMethod(xposed, juv, "b", object : MethodHook() {
-                override fun afterHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    if (param.result != false) {
-                        debug("juv.b() forced false (was ${param.result})")
-                        param.result = false
-                    }
-                }
-            })
-            log("Hooked fallback juv.b")
-        }.onFailure { log("Failed fallback juv.b: ${it.message}") }
+        } ?: log("WARN no discovered carAppKeyboardBlocked")
 
         targets.carAppConstraintsClass?.let { clazz ->
             runCatching {
@@ -475,18 +393,7 @@ object GearheadHooks {
                 })
                 log("Hooked ime onStart (${method.declaringClass.name})")
             }.onFailure { log("Failed ime onStart: ${it.message}") }
-        } ?: runCatching {
-            val xaw = findGearheadClass(ctx.classLoader, "xaw")
-            HookChains.findAndHookMethod(xposed, xaw, "onStart", object : MethodHook() {
-                override fun afterHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    activeInputFragment = WeakReference(param.thisObject)
-                    Reflect.setBooleanField(param.thisObject, "c", false)
-                    runCatching { Reflect.callMethod(param.thisObject, "d") }
-                }
-            })
-            log("Hooked fallback xaw.onStart")
-        }.onFailure { log("Failed fallback xaw.onStart: ${it.message}") }
+        } ?: log("WARN no discovered imeOnStart")
 
         if (targets.imeUnlockMethods.isNotEmpty()) {
             for (method in targets.imeUnlockMethods) {
@@ -496,14 +403,7 @@ object GearheadHooks {
                 }.onFailure { log("Failed ime unlock: ${it.message}") }
             }
         } else {
-            for (shortName in listOf("xbg", "xbp", "xdl", "xdu")) {
-                runCatching {
-                    val clazz = findGearheadClass(ctx.classLoader, shortName)
-                    if (clazz.isInterface || Modifier.isAbstract(clazz.modifiers)) return@runCatching
-                    HookChains.findAndHookMethod(xposed, clazz, "d", unlockHook)
-                    log("Hooked fallback $shortName.d")
-                }.onFailure { log("Failed fallback $shortName.d: ${it.message}") }
-            }
+            log("WARN no discovered imeUnlockMethods")
         }
 
         targets.imeRotaryLockout?.let { method ->
@@ -541,7 +441,6 @@ object GearheadHooks {
                         if (param.result == null) {
                             log("ime.e() was null — trying concrete fragment")
                             val fallbackClass = targets.imeUnlockMethods.firstOrNull()?.declaringClass
-                                ?: runCatching { findGearheadClass(ctx.classLoader, "xbg") }.getOrNull()
                             if (fallbackClass != null) {
                                 param.result = Reflect.newInstance(fallbackClass)
                             }
@@ -583,25 +482,7 @@ object GearheadHooks {
             }.onFailure { log("Failed ime cache: ${it.message}") }
             return
         }
-        runCatching {
-            val carRegionId = Reflect.findClass(
-                "com.google.android.gms.car.display.CarRegionId",
-                ctx.classLoader
-            )
-            val xaq = findGearheadClass(ctx.classLoader, "xaq")
-            HookChains.findAndHookMethod(xposed, xaq, "c", object : MethodHook() {
-                override fun afterHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    activeImeService = WeakReference(param.thisObject)
-                    ModuleLog.gearhead(
-                        "GH-MAPS-000",
-                        "cached active IME service (${param.thisObject?.javaClass?.simpleName})",
-                        always = true
-                    )
-                }
-            }, EditorInfo::class.java, carRegionId)
-            log("Hooked fallback xaq.c IME cache")
-        }.onFailure { log("Failed fallback xaq.c: ${it.message}") }
+        log("WARN no discovered imeCacheMethod")
     }
 
     private fun hookMapsVoiceSessionBlock(ctx: HookContext) {
@@ -680,20 +561,7 @@ object GearheadHooks {
         }
 
         if (targets.voiceTriggerF == null) {
-            runCatching {
-                val kxi = findGearheadClass(ctx.classLoader, "kxi")
-                HookChains.findAndHookMethod(xposed, kxi, "F", object : MethodHook() {
-                    override fun beforeHookedMethod(param: HookParam) {
-                        if (!ModulePrefs.isEnabled()) return
-                        val trigger = param.args[0] as Int
-                        if (trigger != VOICE_SEARCH_TRIGGER_MAPS) return
-                        if (micDictationActive || inMapsMicFromHeader()) return
-                        if (!inMapsSearchVoiceBlock()) return
-                        param.result = null
-                    }
-                }, Int::class.javaPrimitiveType!!)
-                log("Hooked fallback kxi.F")
-            }.onFailure { log("Failed fallback kxi.F: ${it.message}") }
+            log("WARN no discovered voiceTriggerF")
         }
     }
 
@@ -745,32 +613,7 @@ object GearheadHooks {
             }.onFailure { log("Failed demand.k: ${it.message}") }
             return
         }
-        runCatching {
-            val qfy = findGearheadClass(ctx.classLoader, "qfy")
-            HookChains.findAndHookMethod(xposed, qfy, "k", object : MethodHook() {
-                override fun beforeHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    val trigger = param.args[0] as Int
-                    if (trigger != VOICE_SEARCH_TRIGGER_MAPS) return
-                    if (inMapsMicFromHeader()) return
-                    markMapsSearchVoiceBlock()
-                    closeMapsVoiceDemand(ctx.classLoader)
-                }
-
-                override fun afterHookedMethod(param: HookParam) {
-                    if (!ModulePrefs.isEnabled()) return
-                    val trigger = param.args[0] as Int
-                    if (trigger != VOICE_SEARCH_TRIGGER_MAPS) return
-                    if (inMapsMicFromHeader() || param.hasThrowable()) return
-                    runOnMainThread {
-                        Handler(Looper.getMainLooper()).postDelayed({
-                            openNativeProjectedKeyboard(ctx.classLoader)
-                        }, 300L)
-                    }
-                }
-            }, Int::class.javaPrimitiveType!!)
-            log("Hooked fallback qfy.k")
-        }.onFailure { log("Failed fallback qfy.k: ${it.message}") }
+        log("WARN no discovered demandOpen")
     }
 
     private fun hookDemandTranscriptionPassthrough(ctx: HookContext) {
@@ -852,33 +695,72 @@ object GearheadHooks {
         Handler(Looper.getMainLooper()).post(block)
     }
 
-    private fun closeMapsVoiceDemand(classLoader: ClassLoader) {
+    private fun closeMapsVoiceDemand(@Suppress("UNUSED_PARAMETER") classLoader: ClassLoader) {
         runCatching {
-            val controller = targets.demandOpen?.declaringClass?.let { clazz ->
-                // Prefer live demand controller instance from key.i() / mil when available.
-                runCatching {
-                    val key = findGearheadClass(classLoader, "key")
-                    Reflect.callStaticMethod(key, "i")
-                }.getOrNull()?.takeIf { clazz.isInstance(it) }
+            val demandClass = targets.demandOpen?.declaringClass ?: run {
+                ModuleLog.gearhead(
+                    "GH-MAPS-004",
+                    "close demand voice skipped — no discovered demandOpen",
+                    always = true
+                )
+                return
             }
-            val yui = findGearheadClass(classLoader, "yui")
-            val interrupted = Reflect.getStaticObjectField(yui, "INTERRUPTED")
-            if (controller != null) {
-                Reflect.callMethod(controller, "j", interrupted)
-            } else {
-                val qfy = findGearheadClass(classLoader, "qfy")
-                val instance = runCatching {
-                    val key = findGearheadClass(classLoader, "key")
-                    Reflect.callStaticMethod(key, "i")
-                }.getOrNull()
-                if (instance != null && qfy.isInstance(instance)) {
-                    Reflect.callMethod(instance, "j", interrupted)
-                }
+            val interruptMethod = demandClass.declaredMethods.firstOrNull { method ->
+                !Modifier.isStatic(method.modifiers) &&
+                    method.parameterCount == 1 &&
+                    method.parameterTypes[0].isEnum &&
+                    runCatching {
+                        Reflect.getStaticObjectField(method.parameterTypes[0], "INTERRUPTED")
+                    }.getOrNull() != null
+            } ?: run {
+                ModuleLog.gearhead(
+                    "GH-MAPS-004",
+                    "close demand voice skipped — no interrupt method on ${demandClass.simpleName}",
+                    always = true
+                )
+                return
             }
+            val interrupted = Reflect.getStaticObjectField(
+                interruptMethod.parameterTypes[0],
+                "INTERRUPTED"
+            )
+            val instance = findDemandControllerInstance(demandClass) ?: run {
+                ModuleLog.gearhead(
+                    "GH-MAPS-004",
+                    "close demand voice skipped — no live ${demandClass.simpleName} instance",
+                    always = true
+                )
+                return
+            }
+            interruptMethod.isAccessible = true
+            interruptMethod.invoke(instance, interrupted)
             ModuleLog.gearhead("GH-MAPS-003", "closed demand-space voice for keyboard", always = true)
         }.onFailure {
             ModuleLog.gearhead("GH-MAPS-004", "close demand voice failed: ${it.message}", always = true)
         }
+    }
+
+    private fun findDemandControllerInstance(demandClass: Class<*>): Any? {
+        for (method in demandClass.declaredMethods) {
+            if (!Modifier.isStatic(method.modifiers)) continue
+            if (method.parameterCount != 0) continue
+            if (!demandClass.isAssignableFrom(method.returnType)) continue
+            val value = runCatching {
+                method.isAccessible = true
+                method.invoke(null)
+            }.getOrNull()
+            if (value != null) return value
+        }
+        for (field in demandClass.declaredFields) {
+            if (!Modifier.isStatic(field.modifiers)) continue
+            if (!demandClass.isAssignableFrom(field.type)) continue
+            val value = runCatching {
+                field.isAccessible = true
+                field.get(null)
+            }.getOrNull()
+            if (value != null) return value
+        }
+        return null
     }
 
     private fun openNativeProjectedKeyboard(classLoader: ClassLoader) {
@@ -908,12 +790,8 @@ object GearheadHooks {
         openNativeProjectedKeyboard(classLoader)
     }
 
-    private fun resolveGearheadContext(classLoader: ClassLoader): Context? {
+    private fun resolveGearheadContext(@Suppress("UNUSED_PARAMETER") classLoader: ClassLoader): Context? {
         return runCatching {
-            val key = findGearheadClass(classLoader, "key")
-            val controller = Reflect.callStaticMethod(key, "i")
-            Reflect.getObjectField(controller, "g") as Context
-        }.getOrNull() ?: runCatching {
             val atClass = Class.forName("android.app.ActivityThread")
             Reflect.callStaticMethod(atClass, "currentApplication") as Context
         }.getOrNull()
@@ -964,10 +842,7 @@ object GearheadHooks {
         return runCatching {
             val config = targets.imeUnlockMethods.firstOrNull()?.declaringClass?.let {
                 Reflect.newInstance(it)
-            } ?: runCatching {
-                Reflect.newInstance(findGearheadClass(classLoader, "xbg"))
-            }.getOrNull()
-            if (config == null) return false
+            } ?: return false
             Reflect.setBooleanField(config, "c", false)
             Reflect.callMethod(config, "d")
             ModuleLog.gearhead("GH-MAPS-003", "factory fragment.d() projection keyboard", always = true)
@@ -983,9 +858,7 @@ object GearheadHooks {
     }
 
     private fun findRunningImeService(classLoader: ClassLoader, imeClass: Class<*>?): Any? {
-        val targetClass = imeClass ?: runCatching {
-            findGearheadClass(classLoader, "xaq")
-        }.getOrNull() ?: return null
+        val targetClass = imeClass ?: return null
         return runCatching {
             val atClass = Class.forName("android.app.ActivityThread")
             val at = Reflect.callStaticMethod(atClass, "currentActivityThread")

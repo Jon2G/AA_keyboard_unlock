@@ -105,68 +105,6 @@ object MapsInstallProbe {
         }
     }
 
-    private fun dumpClassApi(ctx: HookContext, shortName: String, audit: InstallAudit? = null) {
-        runCatching {
-            val clazz = findMapsClass(ctx.classLoader, shortName)
-            val flags = buildList {
-                if (clazz.isInterface) add("interface")
-                if (Modifier.isAbstract(clazz.modifiers)) add("abstract")
-            }
-            val header = buildString {
-                append(shortName)
-                append(" ")
-                append(clazz.name)
-                if (flags.isNotEmpty()) append(" [${flags.joinToString()}]")
-            }
-            val ctors = clazz.declaredConstructors.take(6).joinToString(" | ") { ctor ->
-                ctor.parameterTypes.joinToString(",") { it.simpleName }.let { params ->
-                    "${clazz.simpleName}($params)"
-                }
-            }
-            val methods = clazz.declaredMethods
-                .filter { !Modifier.isAbstract(it.modifiers) || clazz.isInterface }
-                .take(20)
-                .joinToString(" | ") { m ->
-                    val params = m.parameterTypes.joinToString(",") { it.simpleName }
-                    "${m.name}($params):${m.returnType.simpleName}"
-                }
-            ModuleLog.maps(
-                "MAPS-DRIVE-011",
-                "$header ctors=[$ctors] methods=[$methods]",
-                always = true
-            )
-            if (shortName == "kur") {
-                audit?.kurHasAj = clazz.declaredMethods.any { it.name == "aJ" }
-                val hintMethods = clazz.declaredMethods.filter { isKurHintCandidate(it) }
-                ModuleLog.maps(
-                    "MAPS-DRIVE-011",
-                    "kur hint candidates x${hintMethods.size}: " +
-                        hintMethods.joinToString { m ->
-                            val sig = m.parameterTypes.joinToString(",") { it.simpleName }
-                            "${m.name}($sig)"
-                        },
-                    always = true
-                )
-            }
-            if (shortName == "qhf" && audit != null) {
-                audit.qhfIsInterface = clazz.isInterface
-                audit.qhfHasL = clazz.declaredMethods.any { it.name == "l" && it.parameterCount == 0 }
-                val lMethods = clazz.declaredMethods.filter { it.name == "l" }
-                ModuleLog.maps(
-                    "MAPS-DRIVE-011",
-                    "qhf l() variants x${lMethods.size}: " +
-                        lMethods.joinToString { m ->
-                            val abs = if (Modifier.isAbstract(m.modifiers)) "abstract" else "concrete"
-                            "$abs(${m.parameterCount} params)->${m.returnType.simpleName}"
-                        },
-                    always = true
-                )
-            }
-        }.onFailure {
-            ModuleLog.maps("MAPS-DRIVE-011", "$shortName class missing: ${it.message}", always = true)
-        }
-    }
-
     private fun emitInstallAudit(
         ctx: HookContext,
         audit: InstallAudit,
@@ -216,14 +154,5 @@ object MapsInstallProbe {
     fun isRekLikeType(type: Class<*>): Boolean {
         return type.methods.any { it.name == "d" && it.parameterTypes.isEmpty() } &&
             type.methods.any { it.name == "e" && it.parameterTypes.isNotEmpty() }
-    }
-
-    private fun findMapsClass(classLoader: ClassLoader, shortName: String): Class<*> {
-        for (name in listOf(shortName, "defpackage.$shortName")) {
-            runCatching {
-                return Reflect.findClass(name, classLoader)
-            }
-        }
-        throw ClassNotFoundException(shortName)
     }
 }

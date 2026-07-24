@@ -122,23 +122,24 @@ jobs:
 
           ### Tested with
 
-          - Android Auto \`17.1.662404-release\`
+          - Android Auto \`17.3\`
+          - Google Maps \`26.30\`
           - LSPosed API 82
 
           ### What it unlocks
 
           - External app text fields (WhatsApp reply, messaging, etc.)
-          - Google Maps Car search bar
+          - Google Maps Car search bar (including drive mode / voice-only path)
           - Car App SearchTemplate / Voice Plate keyboard hints
 
-          Voice dictation is blocked; the QWERTY keyboard opens instead.
+          Mic dictation stays available; search taps open QWERTY instead of voice-only.
 
           ### Requirements
 
           - Rooted device (Magisk or KernelSU) with LSPosed
           - Android Auto + Google Maps installed
 
-          See [README](https://github.com/${{ github.repository }}/blob/main/README.md) and [CHANGELOG](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for full details.
+          See [README](https://github.com/${{ github.repository }}/blob/main/README.md) and [CHANGELOG](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md#210---2026-07-24) for v${VERSION} details.
 
           ### Safety
 

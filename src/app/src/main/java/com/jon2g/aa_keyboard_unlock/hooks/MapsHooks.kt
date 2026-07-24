@@ -107,7 +107,6 @@ object MapsHooks {
         hookSearchBarTap(ctx)
         hookTrtDrivingFlags(ctx)
         hookMapsVoiceBypass(ctx)
-        hookTurNavSearch(ctx)
         hookDrivingResourceTrace(ctx)
         hookVoiceOnlyPath(ctx)
         hookProjectedUiLifecycle(ctx)
@@ -597,40 +596,9 @@ object MapsHooks {
     }
 
     /**
-     * Head-unit search may call tur.s() → gmm_mic IPC. Trace only — mic uses the same entry.
+     * Head-unit search may call into gmm_mic IPC. Mic passthrough is handled on
+     * discovered header methods — no short-name tracing.
      */
-    private fun hookTurNavSearch(ctx: HookContext) {
-        val trace = object : MethodHook() {
-            override fun beforeHookedMethod(param: HookParam) {
-                if (!hooksActive()) return
-                ModuleLog.maps(
-                    "MAPS-DRIVE-006",
-                    "${param.thisObject?.javaClass?.simpleName}.s() micActive=${mapsMicVoiceActive.get() == true}",
-                    always = ModulePrefs.isDebug()
-                )
-            }
-        }
-        var hooked = 0
-        runCatching {
-            val pub = findMapsClass(ctx.classLoader, "pub")
-            for (shortName in listOf("tur", "tvj", "rzb", "rzc")) {
-                runCatching {
-                    val clazz = findMapsClass(ctx.classLoader, shortName)
-                    if (!pub.isAssignableFrom(clazz)) return@runCatching
-                    hooked += HookChains.hookAllMethods(xposed, clazz, "s", trace).size
-                }
-            }
-        }.onFailure { debug("Skip pub.s trace: ${it.message}") }
-        if (hooked == 0) {
-            runCatching {
-                val tur = findMapsClass(ctx.classLoader, "tur")
-                hooked = HookChains.hookAllMethods(xposed, tur, "s", trace).size
-            }.onFailure { debug("Skip tur.s trace: ${it.message}") }
-        }
-        if (hooked > 0) {
-            log("Hooked tur.s trace x$hooked")
-        }
-    }
 
     /** Rewrite driving-related resource loads so Maps search shows keyboard hint, not voice-only. */
     private fun hookDrivingResourceTrace(ctx: HookContext) {
@@ -1216,15 +1184,6 @@ object MapsHooks {
             }
             null
         }.getOrNull()
-    }
-
-    private fun findMapsClass(classLoader: ClassLoader, shortName: String): Class<*> {
-        for (name in listOf(shortName, "defpackage.$shortName")) {
-            runCatching {
-                return Reflect.findClass(name, classLoader)
-            }
-        }
-        throw ClassNotFoundException(shortName)
     }
 
     private fun debugEntry(message: String) {
