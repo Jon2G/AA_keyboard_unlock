@@ -317,16 +317,23 @@ object MapsSignatureDiscovery {
             carImeTypes = carImeTypes.sortedBy { it.name }.take(10),
             searchHeaderTaps = rankedHeaderTaps,
             carParameterMethods = carParamMethods
+                .filter { isSafeKeyboardCarParamsGetter(it) }
                 .distinctBy { "${it.declaringClass.name}#${it.name}" }
                 .sortedByDescending { scoreCarParamsMethod(it) }
-                .take(16),
+                .take(8),
             keyboardRestrictedMethods = filterCarGraphRestrictedMethods(
                 restrictedMethods.sortedByDescending { scoreRestrictedMethod(it) },
                 carGraph,
             ).take(32),
             voiceBypassMethods = voiceMethods
+                .filter { isVoiceBypassMethod(it, it.declaringClass) }
+                .filter { method ->
+                    // Stay near search/IME graph — never hook unrelated l(int) like bofy.
+                    carGraph.contains(method.declaringClass) ||
+                        rankedHeaderTaps.any { it.headerClass == method.declaringClass }
+                }
                 .sortedByDescending { scoreVoiceBypassMethod(it) }
-                .take(12),
+                .take(4),
             headerRestrictionConstructors = headerCtors
                 .filter { MapsCarUiStatePatches.isCarSearchUiStateConstructor(it.parameterTypes) }
                 .ifEmpty { headerCtors.take(24) }
@@ -1045,9 +1052,28 @@ object MapsSignatureDiscovery {
         if (Modifier.isStatic(method.modifiers)) return false
         if (method.parameterCount != 1) return false
         if (method.parameterTypes[0] != Int::class.javaPrimitiveType) return false
+        if (method.returnType != Void.TYPE) return false
         if (method.name != "l" && method.name != "m") return false
-        return clazz.declaredFields.any { !Modifier.isStatic(it.modifiers) && isRekFieldType(it.type) } ||
-            clazz.declaredMethods.size <= 30
+        // Must be a search-header-like controller with a rek keyboard field.
+        // The old "methods.size <= 30" branch matched unrelated types (e.g. bofy) and
+        // crashing navigation start (bofy.a / bofz.<clinit>).
+        return clazz.declaredFields.any { !Modifier.isStatic(it.modifiers) && isRekFieldType(it.type) }
+    }
+
+    /**
+     * Avoid mutating boolean A/c on broad Maps parameter hubs (navigation camera, ads, …).
+     * Those types often share field letters with keyboard car-params but mean something else.
+     */
+    private fun isSafeKeyboardCarParamsGetter(method: Method): Boolean {
+        val name = method.name
+        if (name.startsWith("get") && name.length > 5) return false
+        if (name.contains("Navigation", ignoreCase = true)) return false
+        if (name.contains("Placesheet", ignoreCase = true)) return false
+        if (name.contains("MapAds", ignoreCase = true)) return false
+        if (name.contains("MapContent", ignoreCase = true)) return false
+        if (name.contains("MapCore", ignoreCase = true)) return false
+        if (name.contains("Suggest", ignoreCase = true)) return false
+        return isCarParamsType(method.returnType)
     }
 
     private fun isHeaderRestrictionConstructor(ctor: Constructor<*>): Boolean {

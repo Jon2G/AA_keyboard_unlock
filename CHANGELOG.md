@@ -4,6 +4,20 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-07-25
+
+Bugfix for Maps **26.30** on Android Auto **17.3**: starting navigation no longer crashes after unlocking the car keyboard.
+
+### Fixed
+
+- Maps crash when selecting a place to start navigation (`ExceptionInInitializerError` in `bofy`/`bofz`) — voice-bypass discovery no longer matches unrelated `l(int)` methods (e.g. `bofy.l`); only search-header/rek controllers in the car-search graph
+- Car-params patching no longer mutates boolean `A`/`c` on navigation/ads/map parameter hubs (`getNavigationCameraParameters`, `getMapAdsParameters`, …)
+- Search-header / UiState hooks no longer blanket-clear every `true` constructor/rebuilder bool — only mic/keyboard restriction flags on car-search UiState shapes
+
+### Changed
+
+- **`DiscoveryCache` schema v6** — forces a fresh Maps/Gearhead discovery resolve after the tighter matchers
+
 ## [2.1.0] - 2026-07-24
 
 Android Auto **17.3** + Maps **26.30** keyboard unlock: signature/anchor discovery is the source of truth; short names are discovery probes only and rejected unless API shape matches. Hook layers consume **discovered targets only**.

@@ -75,7 +75,7 @@ object MapsVoiceOnlyPathHooks {
         return hooked
     }
 
-    /** Force restriction bools / UiState args on discovered search-header controllers. */
+    /** Patch UiState args on discovered search-header controllers (never blanket-clear all bools). */
     private fun hookSearchHeaderConstructors(
         xposed: XposedInterface,
         taps: List<MapsSignatureDiscovery.SearchHeaderTap>,
@@ -83,19 +83,24 @@ object MapsVoiceOnlyPathHooks {
         var hooked = 0
         for (tap in taps) {
             for (ctor in tap.headerClass.declaredConstructors) {
-                if (ctor.parameterCount < 2) continue
+                if (ctor.parameterCount < 1) continue
+                // Only constructors that take a car-search UiState (or look like one).
+                val hasUiStateArg = ctor.parameterTypes.any { type ->
+                    type.declaredConstructors.any {
+                        MapsCarUiStatePatches.isCarSearchUiStateConstructor(it.parameterTypes)
+                    }
+                }
+                if (!hasUiStateArg) continue
                 if (!hookOnce("${tap.headerClass.name}#<init>#${ctor.parameterCount}#hdr")) continue
                 runCatching {
                     HookChains.hookExecutable(xposed, ctor, object : MethodHook() {
                         override fun beforeHookedMethod(param: HookParam) {
                             if (!MapsCarContext.shouldApplyBehavioralHooks()) return
                             val patched = MapsCarUiStatePatches.patchArgs(param.args)
-                            val forced = forceTrueBoolsFalse(param.args, ctor.parameterTypes)
-                            if (patched > 0 || forced > 0) {
+                            if (patched > 0) {
                                 ModuleLog.maps(
                                     "MAPS-DRIVE-012",
-                                    "${tap.headerClass.simpleName}.<init> forced $forced " +
-                                        "restriction bool(s) false uiStatePatched=$patched",
+                                    "${tap.headerClass.simpleName}.<init> UiState args patched x$patched",
                                     always = true
                                 )
                             }
@@ -154,23 +159,14 @@ object MapsVoiceOnlyPathHooks {
         var hooked = 0
         for (ctor in constructors) {
             val params = ctor.parameterTypes
-            if (!MapsCarUiStatePatches.isCarSearchUiStateConstructor(params) &&
-                params.count {
-                    it == Boolean::class.javaPrimitiveType || it == Boolean::class.java
-                } < 2
-            ) {
-                continue
-            }
+            if (!MapsCarUiStatePatches.isCarSearchUiStateConstructor(params)) continue
             if (!hookOnce("${ctor.declaringClass.name}#<init>#${params.size}#ui")) continue
             runCatching {
                 HookChains.hookExecutable(xposed, ctor, object : MethodHook() {
                     override fun beforeHookedMethod(param: HookParam) {
                         if (!MapsCarContext.shouldApplyBehavioralHooks()) return
-                        val forced = if (MapsCarUiStatePatches.isCarSearchUiStateConstructor(params)) {
+                        val forced =
                             MapsCarUiStatePatches.forceCarSearchUiStateConstructorBools(param.args)
-                        } else {
-                            forceTrueBoolsFalse(param.args, params)
-                        }
                         if (forced > 0) {
                             ModuleLog.maps(
                                 "MAPS-DRIVE-012",
@@ -291,7 +287,6 @@ object MapsVoiceOnlyPathHooks {
     /** Static methods that take/return UiState and rebuild with restriction bools (qnu.t-shaped). */
     private fun hookStaticUiStateRebuilders(xposed: XposedInterface, uiType: Class<*>): Int {
         var hooked = 0
-        val booleanPrimitive = Boolean::class.javaPrimitiveType!!
         // Rebuilders live on controllers, not always on UiState itself — scan classes that
         // reference uiType in method signatures via header/rek seeds is done in controllers hook.
         // Here: static methods declared ON types that have a method returning uiType.
@@ -300,7 +295,7 @@ object MapsVoiceOnlyPathHooks {
             if (!Modifier.isStatic(method.modifiers)) continue
             if (method.returnType != uiType) continue
             if (!hookOnce("${uiType.name}#${method.name}#rebuild")) continue
-            hooked += hookUiStateRebuilderMethod(xposed, method, booleanPrimitive)
+            hooked += hookUiStateRebuilderMethod(xposed, method)
         }
         return hooked
     }
@@ -311,7 +306,6 @@ object MapsVoiceOnlyPathHooks {
         targets: MapsSignatureDiscovery.DiscoveredTargets,
     ): Int {
         var hooked = 0
-        val booleanPrimitive = Boolean::class.javaPrimitiveType!!
         val controllers = linkedSetOf<Class<*>>()
         targets.searchHeaderTaps.forEach { controllers += it.headerClass }
         for (tap in targets.searchHeaderTaps) {
@@ -326,7 +320,7 @@ object MapsVoiceOnlyPathHooks {
                 if (method.returnType != uiType) continue
                 if (method.parameterTypes.none { it == uiType }) continue
                 if (!hookOnce("${method.declaringClass.name}#${method.name}#uirebuild")) continue
-                hooked += hookUiStateRebuilderMethod(xposed, method, booleanPrimitive)
+                hooked += hookUiStateRebuilderMethod(xposed, method)
             }
         }
         for (controller in controllers) {
@@ -334,7 +328,7 @@ object MapsVoiceOnlyPathHooks {
                 if (!Modifier.isStatic(method.modifiers)) continue
                 if (method.returnType != uiType) continue
                 if (!hookOnce("${controller.name}#${method.name}#uirebuild")) continue
-                hooked += hookUiStateRebuilderMethod(xposed, method, booleanPrimitive)
+                hooked += hookUiStateRebuilderMethod(xposed, method)
             }
         }
         if (targets.searchHeaderTaps.isEmpty()) {
@@ -351,19 +345,18 @@ object MapsVoiceOnlyPathHooks {
     private fun hookUiStateRebuilderMethod(
         xposed: XposedInterface,
         method: Method,
-        booleanPrimitive: Class<*>,
     ): Int {
         return runCatching {
             HookChains.hookMethod(xposed, method, object : MethodHook() {
                 override fun beforeHookedMethod(param: HookParam) {
                     if (!MapsCarContext.shouldApplyBehavioralHooks()) return
                     MapsCarUiStatePatches.patchArgs(param.args)
-                    for (index in method.parameterTypes.indices) {
-                        val type = method.parameterTypes[index]
-                        if (type != booleanPrimitive && type != Boolean::class.java) continue
-                        if (param.args.getOrNull(index) == true) {
-                            param.args[index] = false
-                        }
+                    // Only clear the mic/keyboard restriction pair when args match UiState ctor shape
+                    // (String, int, String, bool, bool, …). Never blanket-clear every true bool.
+                    if (MapsCarUiStatePatches.isCarSearchUiStateConstructor(method.parameterTypes)) {
+                        MapsCarUiStatePatches.forceCarSearchUiStateConstructorBools(param.args)
+                    } else {
+                        forceRestrictionBoolsAfterUiStateArg(param.args, method.parameterTypes)
                     }
                 }
 
@@ -530,16 +523,32 @@ object MapsVoiceOnlyPathHooks {
         }.getOrNull()
     }
 
-    private fun forceTrueBoolsFalse(args: Array<Any?>, params: Array<Class<*>>): Int {
+    /**
+     * When a rebuilder takes (…, UiState, bool, bool, …), clear the first two bools after the
+     * UiState arg (mic/keyboard restrictions). Leave unrelated flags alone.
+     */
+    private fun forceRestrictionBoolsAfterUiStateArg(
+        args: Array<Any?>,
+        params: Array<Class<*>>,
+    ): Int {
         val booleanPrimitive = Boolean::class.javaPrimitiveType!!
+        val uiIndex = params.indexOfFirst { type ->
+            type.declaredConstructors.any {
+                MapsCarUiStatePatches.isCarSearchUiStateConstructor(it.parameterTypes)
+            }
+        }
+        if (uiIndex < 0) return 0
         var forced = 0
-        for (index in params.indices) {
+        var boolsSeen = 0
+        for (index in (uiIndex + 1) until params.size) {
             val type = params[index]
             if (type != booleanPrimitive && type != Boolean::class.java) continue
             if (args.getOrNull(index) == true) {
                 args[index] = false
                 forced++
             }
+            boolsSeen++
+            if (boolsSeen >= 2) break
         }
         return forced
     }

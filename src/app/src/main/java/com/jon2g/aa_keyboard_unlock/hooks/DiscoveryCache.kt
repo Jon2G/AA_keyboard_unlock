@@ -17,7 +17,7 @@ import java.lang.reflect.Method
  */
 object DiscoveryCache {
     /** Bump when discovery rules change so stale false-positive caches are discarded. */
-    const val SCHEMA_VERSION = 5
+    const val SCHEMA_VERSION = 6
 
     private const val PREFS_NAME = "aa_keyboard_unlock_discovery_v$SCHEMA_VERSION"
     private const val KEY_FINGERPRINT = "fingerprint"
