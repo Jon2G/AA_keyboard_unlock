@@ -1,6 +1,7 @@
 package com.jon2g.aa_keyboard_unlock.hooks
 
 import com.jon2g.aa_keyboard_unlock.ModuleLog
+import java.lang.reflect.Constructor
 import java.lang.reflect.Modifier
 
 /**
@@ -93,6 +94,10 @@ object MapsCarUiStatePatches {
             runCatching { field.get(state) }.getOrNull()
         }
     }
+
+    /** Safe for types whose ctor params reference optional platform stubs (e.g. XR Node). */
+    fun matchesCarSearchUiStateConstructor(ctor: Constructor<*>): Boolean =
+        runCatching { isCarSearchUiStateConstructor(ctor.parameterTypes) }.getOrDefault(false)
 
     /** UiState ctor: String, int, String, bool mic, bool keyboard, … */
     fun isCarSearchUiStateConstructor(parameterTypes: Array<Class<*>>): Boolean {

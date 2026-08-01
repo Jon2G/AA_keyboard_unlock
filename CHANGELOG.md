@@ -4,6 +4,39 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.1.5] - 2026-07-31
+
+Fix shape-first discovery regressions on Android Auto **17.4** + Maps **26.31** (Maps car search QWERTY, Gearhead `:projection` stability).
+
+### Fixed
+
+- Gearhead dex scan returned after the first classloader dex (~6803 classes) and missed sensors/demand hooks in secondary APK dex — always merge `classes*.dex` from the host APK zip
+- Maps gap-fill preloaded ~48k classes and blocked hook install for 15–90s (or aborted entirely) — shape-validated fallbacks now infer UiState from ranked header taps only
+- Maps ranked wrong search headers (`bbms`, `aqfr`, …) after `qok`/`qoq` gap-fill was removed — restore header-field UiState linkage and boost `rlr` keyboard-opener scoring (26.31 `qoq.b`)
+- `inferUiStateFromHeaderFields` crashed on XR stub types (`NoClassDefFoundError: com.android.extensions.xr.node.Node`) — guard constructor parameter inspection
+- Gearhead `:projection` crash loop (`NoClassDefFoundError: kwv` / PhenotypeContext) — stop probing obfuscated parking enums during early dex scan
+- APK dex extraction failed (`Writable dex file … is not allowed`; missing cache dir during `onPackageReady`) — mark extracted dex read-only and fall back to `/data/user/0/<pkg>/files`
+
+### Changed
+
+- **`DiscoveryCache` schema v10–v11** — invalidates stale shape-first caches with wrong Maps headers or empty Gearhead discovery
+
+## [2.1.4] - 2026-07-31
+
+Discovery is **shape-first** — no obfuscated short-name seeds on cache miss.
+
+### Changed
+
+- **Gearhead:** removed `resolveAnchors()` fast-path (`lic`, `qfx`, `qqe`, …); every cache miss runs full dex scan by API shape. Stable FQCNs only (`TouchInputMethodService`, `DemandClientService`, `VoiceSessionConfig`, `CarRegionId`)
+- **Maps:** gap-fill fallbacks walk dex for UiState/header/hint shapes — dropped `qok`/`qoq`/`onl` probe lists
+- **`DiscoveryCache` schema v8** — invalidates version-specific seed caches
+
+### Fixed
+
+- Shape-first Gearhead scan missed obfuscated targets in secondary dex — enumerate via ClassLoader multidex (same as Maps), not `DexFile(apk)` alone
+
+- **`DiscoveryCache` schema v9** — invalidates empty v8 discovery caches
+
 ## [2.1.3] - 2026-07-31
 
 Maps car-search keyboard on AA **17.4** / Maps **26.31**: fix Gearhead→Maps fallback and `rlr` opener discovery.

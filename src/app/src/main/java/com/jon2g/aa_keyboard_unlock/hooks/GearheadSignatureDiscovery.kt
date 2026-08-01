@@ -7,6 +7,7 @@ import com.jon2g.aa_keyboard_unlock.ModuleLog
 import com.jon2g.aa_keyboard_unlock.xposed.HookContext
 import com.jon2g.aa_keyboard_unlock.xposed.Reflect
 import dalvik.system.DexFile
+import java.io.File
 import java.lang.reflect.Constructor
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
@@ -128,17 +129,6 @@ object GearheadSignatureDiscovery {
                 voiceTriggerF == null &&
                 locationKeyboardEnabled == null
 
-        /** Critical 17.x driving/IME surface — enough to skip a full dex walk. */
-        fun isAnchorComplete(): Boolean =
-            sensorCallbacks.isNotEmpty() &&
-                locationKeyboardEnabled != null &&
-                locationParkingState != null &&
-                parkingEnumClass != null &&
-                imeCacheMethod != null &&
-                imeUnlockMethods.isNotEmpty() &&
-                voiceTriggerF != null &&
-                demandOpen != null &&
-                carAppKeyboardBlocked != null
     }
 
     @Volatile
@@ -289,73 +279,50 @@ object GearheadSignatureDiscovery {
         }.getOrNull() ?: runCatching {
             Reflect.findClass("android.app.Fragment", ctx.classLoader)
         }.getOrNull()
-        val sensorIface = loadObfuscatedClass(ctx.classLoader, "qqe")
-        val demandIface = loadObfuscatedClass(ctx.classLoader, "kvv")
-            ?: loadObfuscatedClass(ctx.classLoader, "kvp")
-        val voiceIface = loadObfuscatedClass(ctx.classLoader, "kvp")
-            ?: loadObfuscatedClass(ctx.classLoader, "kvj")
 
-        // Anchor-first seeds (stable FQCNs / known 17.3 shapes) before loose dex heuristics.
-        val seeded = resolveAnchors(ctx.classLoader, carRegionId, voiceSessionConfig, sensorIface)
-        if (seeded.isAnchorComplete()) {
-            val demandOpenCause = runCatching {
-                val demand = Reflect.findClass(
-                    "com.google.android.gearhead.demand.DemandClientService",
-                    ctx.classLoader,
-                )
-                demand.getDeclaredMethod("b", Bundle::class.java).also { it.isAccessible = true }
-            }.getOrNull()
-            val anchored = seeded.copy(demandOpenCause = demandOpenCause)
-            ModuleLog.gearhead(
-                "GH-DRIVE-010",
-                "dex scan skipped — anchors complete " +
-                    "sensors=${anchored.sensorCallbacks.size} " +
-                    "ime=${anchored.imeServiceClass?.simpleName} " +
-                    "voice=${anchored.voiceController?.simpleName} " +
-                    "demand=${anchored.demandOpen?.declaringClass?.simpleName} " +
-                    "imeFrags=${anchored.imeUnlockMethods.size}",
-                always = true,
-            )
-            return anchored
-        }
-
-        val sensorMethods = linkedSetOf<Method>().also { it.addAll(seeded.sensorCallbacks) }
-        var parkingEnum: Class<*>? = seeded.parkingEnumClass
-        var locationQ: Method? = seeded.locationKeyboardEnabled
-        var locationS: Method? = seeded.locationWheelSpeedNonZero
-        var locationC: Method? = seeded.locationParkingState
-        var locationF: Method? = seeded.locationSpeed
-        var assistKbd: Method? = seeded.assistantKeyboardEnabled
-        var carUiA: Method? = seeded.carUiTouchscreen
-        var carUiB: Method? = seeded.carUiTouchpad
-        var carAppBlocked: Method? = seeded.carAppKeyboardBlocked
-        var carAppConstraints: Class<*>? = seeded.carAppConstraintsClass
-        var imeService: Class<*>? = seeded.imeServiceClass
-        var imeCache: Method? = seeded.imeCacheMethod
-        var imeStart: Method? = seeded.imeStartExternal
-        var imeFragBase: Class<*>? = seeded.imeFragmentBase
-        var imeOnStart: Method? = seeded.imeOnStart
-        val imeUnlock = linkedSetOf<Method>().also { it.addAll(seeded.imeUnlockMethods) }
-        var imeRotary: Method? = seeded.imeRotaryLockout
-        var imeFactory: Method? = seeded.imeFactory
-        var voiceCtrl: Class<*>? = seeded.voiceController
-        var voiceF: Method? = seeded.voiceTriggerF
-        var voiceG: Method? = seeded.voiceTriggerG
-        var voiceSession: Method? = seeded.voiceSessionStart
-        var demandK: Method? = seeded.demandOpen
-        var demandL: Method? = seeded.demandTranscription
-        var textFieldCtor: Constructor<*>? = seeded.textFieldCtor
-        var kbdRestrictCtor: Constructor<*>? = seeded.keyboardRestrictionCtor
-        var searchHint: Method? = seeded.searchHintMethod
-        var kbdCallback: Class<*>? = seeded.keyboardCallbackInterface
+        // Shape-first: no short-name seeds or early exit — every cache miss walks dex by API shape.
+        val sensorMethods = linkedSetOf<Method>()
+        var parkingEnum: Class<*>? = null
+        var locationQ: Method? = null
+        var locationS: Method? = null
+        var locationC: Method? = null
+        var locationF: Method? = null
+        var assistKbd: Method? = null
+        var carUiA: Method? = null
+        var carUiB: Method? = null
+        var carAppBlocked: Method? = null
+        var carAppConstraints: Class<*>? = null
+        var imeService: Class<*>? = null
+        var imeCache: Method? = null
+        var imeStart: Method? = null
+        var imeFragBase: Class<*>? = null
+        var imeOnStart: Method? = null
+        val imeUnlock = linkedSetOf<Method>()
+        var imeRotary: Method? = null
+        var imeFactory: Method? = null
+        var voiceCtrl: Class<*>? = null
+        var voiceF: Method? = null
+        var voiceG: Method? = null
+        var voiceSession: Method? = null
+        var demandK: Method? = null
+        var demandL: Method? = null
+        var textFieldCtor: Constructor<*>? = null
+        var kbdRestrictCtor: Constructor<*>? = null
+        var searchHint: Method? = null
+        var kbdCallback: Class<*>? = null
 
         val seen = mutableSetOf<String>()
         var loaded = 0
 
-        for (path in ctx.sourcePaths.ifEmpty { listOf(ctx.sourcePath) }) {
-            if (!apkContainsDex(path)) continue
+        val dexFiles = collectDexFiles(ctx.classLoader, ctx.sourcePaths.ifEmpty { listOf(ctx.sourcePath) }, ctx.packageName)
+        ModuleLog.gearhead(
+            "GH-DRIVE-010",
+            "dex sources=${dexFiles.size} (classLoader+apk multidex)",
+            always = true,
+        )
+
+        for ((label, dex) in dexFiles) {
             runCatching {
-                val dex = DexFile(path)
                 val entries = dex.entries()
                 while (entries.hasMoreElements()) {
                     val name = normalizeDexClassName(entries.nextElement())
@@ -365,9 +332,9 @@ object GearheadSignatureDiscovery {
                     loaded++
                     if (isCoroutineLike(clazz)) continue
 
-                    if (parkingEnum == null && isParkingEnum(clazz)) {
-                        parkingEnum = clazz
-                    }
+                    // Do not probe obfuscated enums during early hook install — loading or
+                    // reflecting enum metadata can poison classes like kwv before PhenotypeContext
+                    // is ready (projection crash loop). Parking enum is optional (GH warns when absent).
 
                     if (clazz.isInterface) {
                         if (kbdCallback == null && isKeyboardCallbackInterface(clazz)) {
@@ -376,18 +343,8 @@ object GearheadSignatureDiscovery {
                         continue
                     }
 
-                    // Prefer sensor callbacks that implement the sensor interface.
-                    if (sensorIface != null && sensorIface.isAssignableFrom(clazz)) {
-                        clazz.declaredMethods.filter {
-                            isSensorCallback(it) && !Modifier.isAbstract(it.modifiers)
-                        }.forEach { sensorMethods += it }
-                    }
-
                     for (method in clazz.declaredMethods) {
-                        if (sensorIface == null &&
-                            isSensorCallback(method) &&
-                            !Modifier.isAbstract(method.modifiers)
-                        ) {
+                        if (isSensorCallback(method) && !Modifier.isAbstract(method.modifiers)) {
                             sensorMethods += method
                         }
                         if (carRegionId != null &&
@@ -405,20 +362,20 @@ object GearheadSignatureDiscovery {
                             imeStart = method
                         }
                         if (voiceSessionConfig != null && voiceF == null) {
-                            if (isVoiceControllerClass(clazz, voiceSessionConfig, voiceIface) &&
+                            if (isVoiceControllerClass(clazz, voiceSessionConfig, null) &&
                                 isVoiceTriggerF(method)
                             ) {
                                 voiceCtrl = clazz
                                 voiceF = method
                             }
-                            if (isVoiceControllerClass(clazz, voiceSessionConfig, voiceIface) &&
+                            if (isVoiceControllerClass(clazz, voiceSessionConfig, null) &&
                                 isVoiceTriggerG(method)
                             ) {
                                 voiceCtrl = clazz
                                 voiceG = method
                             }
                             if (isVoiceSessionStart(method, voiceSessionConfig) &&
-                                isVoiceControllerClass(clazz, voiceSessionConfig, voiceIface)
+                                isVoiceControllerClass(clazz, voiceSessionConfig, null)
                             ) {
                                 voiceCtrl = clazz
                                 if (voiceSession == null || method.name == "ab") {
@@ -428,15 +385,23 @@ object GearheadSignatureDiscovery {
                         }
                         if (demandK == null &&
                             isDemandOpenK(method) &&
-                            looksLikeDemandController(clazz, demandIface)
+                            looksLikeDemandController(clazz, null)
                         ) {
                             demandK = method
                         }
                         if (demandL == null &&
                             isDemandTranscriptionL(method) &&
-                            looksLikeDemandController(clazz, demandIface)
+                            looksLikeDemandController(clazz, null)
                         ) {
                             demandL = method
+                        }
+                        if (demandK == null &&
+                            Modifier.isStatic(method.modifiers) &&
+                            method.parameterCount == 0 &&
+                            looksLikeDemandController(method.returnType, null)
+                        ) {
+                            demandK = method.returnType.declaredMethods.firstOrNull { isDemandOpenK(it) }
+                            demandL = method.returnType.declaredMethods.firstOrNull { isDemandTranscriptionL(it) }
                         }
                         if (searchHint == null && isSearchHintBuilder(method, clazz)) {
                             searchHint = method
@@ -476,6 +441,8 @@ object GearheadSignatureDiscovery {
                         }
                     }
                 }
+            }.onFailure {
+                ModuleLog.gearhead("GH-DRIVE-010", "dex enumerate failed $label: ${it.message}", always = true)
             }
         }
 
@@ -562,15 +529,7 @@ object GearheadSignatureDiscovery {
             demand.getDeclaredMethod("b", Bundle::class.java).also { it.isAccessible = true }
         }.getOrNull()
 
-        ModuleLog.gearhead(
-            "GH-DRIVE-010",
-            "dex scan done loaded=$loaded sensors=${sensorMethods.size} " +
-                "ime=${imeService?.simpleName} voice=${voiceCtrl?.simpleName} " +
-                "locQ=${locationQ != null} demandK=${demandK != null}",
-            always = true,
-        )
-
-        return DiscoveredTargets(
+        val scanned = DiscoveredTargets(
             sensorCallbacks = sensorMethods.toList(),
             locationKeyboardEnabled = locationQ,
             locationWheelSpeedNonZero = locationS,
@@ -603,6 +562,63 @@ object GearheadSignatureDiscovery {
             keyboardCallbackInterface = kbdCallback,
             fromCache = false,
         )
+
+        ModuleLog.gearhead(
+            "GH-DRIVE-010",
+            "shape-first dex scan done loaded=$loaded sensors=${sensorMethods.size} " +
+                "ime=${imeService?.simpleName} voice=${voiceCtrl?.simpleName} " +
+                "locQ=${locationQ != null} demandK=${demandK != null}",
+            always = true,
+        )
+
+        return mergeStableFqcnAnchors(ctx.classLoader, carRegionId, scanned)
+    }
+
+    /**
+     * Stable Google / platform FQCNs only — never obfuscated short-name seeds.
+     */
+    private fun mergeStableFqcnAnchors(
+        classLoader: ClassLoader,
+        carRegionId: Class<*>?,
+        targets: DiscoveredTargets,
+    ): DiscoveredTargets {
+        if (targets.imeCacheMethod != null || carRegionId == null) return targets
+        val touchIme = runCatching {
+            Reflect.findClass(
+                "com.google.android.projection.gearhead.input.TouchInputMethodService",
+                classLoader,
+            )
+        }.getOrNull() ?: return targets
+
+        var imeService = targets.imeServiceClass ?: touchIme
+        var imeCache = targets.imeCacheMethod
+        var cursor: Class<*>? = touchIme
+        while (cursor != null && cursor != Any::class.java) {
+            val cache = cursor.declaredMethods.firstOrNull { isImeCacheMethod(it, carRegionId) }
+            if (cache != null) {
+                imeService = cursor
+                imeCache = cache
+                break
+            }
+            cursor = cursor.superclass
+        }
+
+        val imeStart = targets.imeStartExternal
+            ?: imeService?.declaredMethods?.firstOrNull {
+                it.name == "h" && it.parameterCount == 0 && it.returnType == Void.TYPE
+            }
+
+        if (imeCache == null) return targets
+        ModuleLog.gearhead(
+            "GH-DRIVE-010",
+            "stable FQCN IME anchor ${imeService?.simpleName}.${imeCache.name}()",
+            always = true,
+        )
+        return targets.copy(
+            imeServiceClass = imeService,
+            imeCacheMethod = imeCache,
+            imeStartExternal = imeStart,
+        )
     }
 
     private fun logDiscovery(t: DiscoveredTargets) {
@@ -616,218 +632,6 @@ object GearheadSignatureDiscovery {
                 "carAppBlocked=${t.carAppKeyboardBlocked != null} " +
                 "cache=${t.fromCache}",
             always = true,
-        )
-    }
-
-    /**
-     * Resolve critical targets via stable FQCNs / known short-name **seeds** before loose heuristics.
-     * Seeds are validated by API shape ([isSensorCallback], [isVoiceControllerClass], etc.) — they are
-     * not permanent remaps. When [isAnchorComplete] the full dex walk is skipped.
-     */
-    private fun resolveAnchors(
-        classLoader: ClassLoader,
-        carRegionId: Class<*>?,
-        voiceSessionConfig: Class<*>?,
-        sensorIface: Class<*>?,
-    ): DiscoveredTargets {
-        val sensors = linkedSetOf<Method>()
-        for (name in listOf("lic", "lhs", "lhl", "lhv")) {
-            val clazz = loadObfuscatedClass(classLoader, name) ?: continue
-            if (sensorIface != null && !sensorIface.isAssignableFrom(clazz)) continue
-            clazz.declaredMethods.filter {
-                isSensorCallback(it) && !Modifier.isAbstract(it.modifiers)
-            }.forEach { sensors += it }
-        }
-
-        val parkingEnum = loadObfuscatedClass(classLoader, "lhi")?.takeIf { isParkingEnum(it) }
-            ?: loadObfuscatedClass(classLoader, "lhb")?.takeIf { isParkingEnum(it) }
-        val locationHost = loadObfuscatedClass(classLoader, "lib")
-            ?: loadObfuscatedClass(classLoader, "lhu")
-        val locationQ = locationHost?.declaredMethods?.firstOrNull {
-            it.name == "q" && it.parameterCount == 0 &&
-                it.returnType == Boolean::class.javaPrimitiveType
-        }
-        val locationS = locationHost?.declaredMethods?.firstOrNull {
-            it.name == "s" && it.parameterCount == 0 &&
-                it.returnType == Boolean::class.javaPrimitiveType
-        }
-        val locationC = locationHost?.declaredMethods?.firstOrNull {
-            it.name == "c" && it.parameterCount == 0 && parkingEnum != null &&
-                it.returnType == parkingEnum
-        }
-        val locationF = locationHost?.declaredMethods?.firstOrNull {
-            it.parameterCount == 0 &&
-                it.returnType == java.lang.Float::class.java &&
-                (it.name == "d" || it.name == "f")
-        }
-
-        val jqt = loadObfuscatedClass(classLoader, "jqt")
-        val carUiA = jqt?.declaredMethods?.firstOrNull {
-            it.name == "a" && it.parameterCount == 0 &&
-                it.returnType == Boolean::class.javaPrimitiveType
-        }
-        val carUiB = jqt?.declaredMethods?.firstOrNull {
-            it.name == "b" && it.parameterCount == 0 &&
-                it.returnType == Boolean::class.javaPrimitiveType
-        }
-
-        val juv = loadObfuscatedClass(classLoader, "juv")
-        val carAppBlocked = juv?.declaredMethods?.firstOrNull {
-            Modifier.isStatic(it.modifiers) && it.name == "b" && it.parameterCount == 0 &&
-                it.returnType == Boolean::class.javaPrimitiveType
-        }
-
-        // IME: TouchInputMethodService extends xbh extends xaq
-        val touchIme = runCatching {
-            Reflect.findClass(
-                "com.google.android.projection.gearhead.input.TouchInputMethodService",
-                classLoader,
-            )
-        }.getOrNull()
-        var imeService: Class<*>? = touchIme
-        var imeCache: Method? = null
-        var imeStart: Method? = null
-        if (carRegionId != null) {
-            var cursor: Class<*>? = touchIme
-            while (cursor != null && cursor != Any::class.java) {
-                val cache = cursor.declaredMethods.firstOrNull { isImeCacheMethod(it, carRegionId) }
-                if (cache != null) {
-                    imeService = cursor
-                    imeCache = cache
-                    break
-                }
-                cursor = cursor.superclass
-            }
-            if (imeCache == null) {
-                val xaq = loadObfuscatedClass(classLoader, "xaq")
-                imeCache = xaq?.declaredMethods?.firstOrNull { isImeCacheMethod(it, carRegionId) }
-                if (imeCache != null) imeService = xaq
-            }
-        }
-        imeService?.declaredMethods?.firstOrNull {
-            it.name == "h" && it.parameterCount == 0 && it.returnType == Void.TYPE
-        }?.let { imeStart = it }
-
-        val imeFragBase = loadObfuscatedClass(classLoader, "xba")?.takeIf { isImeFragmentBase(it) }
-            ?: loadObfuscatedClass(classLoader, "xaw")?.takeIf { isImeFragmentBase(it) }
-        val imeOnStart = imeFragBase?.declaredMethods?.firstOrNull {
-            it.name == "onStart" && it.parameterCount == 0
-        }
-        val imeUnlock = linkedSetOf<Method>()
-        var imeRotary: Method? = null
-        for (name in listOf("xbk", "xbt", "xbg", "xbp")) {
-            val clazz = loadObfuscatedClass(classLoader, name) ?: continue
-            clazz.declaredMethods.firstOrNull {
-                it.name == "d" && it.parameterCount == 0 && !Modifier.isAbstract(it.modifiers)
-            }?.let { imeUnlock += it }
-            clazz.declaredMethods.firstOrNull {
-                it.name == "k" && it.parameterCount == 0 &&
-                    it.returnType == Boolean::class.javaPrimitiveType
-            }?.let { imeRotary = it }
-        }
-        val imeFactory = loadObfuscatedClass(classLoader, "xbh")?.declaredMethods?.firstOrNull {
-            it.name == "e" && it.parameterCount == 0
-        }
-
-        // Voice: kxp (17.4) / kxi (17.3) implement kvp with VoiceSessionConfig methods
-        var voiceCtrl: Class<*>? = null
-        var voiceF: Method? = null
-        var voiceG: Method? = null
-        var voiceSession: Method? = null
-        val voiceIface = loadObfuscatedClass(classLoader, "kvp")
-            ?: loadObfuscatedClass(classLoader, "kvj")
-        if (voiceSessionConfig != null) {
-            for (name in listOf("kxp", "kxi")) {
-                val clazz = loadObfuscatedClass(classLoader, name) ?: continue
-                if (!isVoiceControllerClass(clazz, voiceSessionConfig, voiceIface)) continue
-                voiceCtrl = clazz
-                voiceF = clazz.declaredMethods.firstOrNull { isVoiceTriggerF(it) }
-                voiceG = clazz.declaredMethods.firstOrNull { isVoiceTriggerG(it) }
-                voiceSession = clazz.declaredMethods.firstOrNull {
-                    isVoiceSessionStart(it, voiceSessionConfig) && it.name == "ab"
-                } ?: clazz.declaredMethods.firstOrNull { isVoiceSessionStart(it, voiceSessionConfig) }
-            }
-        }
-
-        // Demand: qfx implements kvv on 17.4; qfy on 17.3
-        var demandK: Method? = null
-        var demandL: Method? = null
-        val qfx = loadObfuscatedClass(classLoader, "qfx")
-        if (qfx != null) {
-            demandK = qfx.declaredMethods.firstOrNull { isDemandOpenK(it) }
-            demandL = qfx.declaredMethods.firstOrNull { isDemandTranscriptionL(it) }
-        }
-        val qfy = loadObfuscatedClass(classLoader, "qfy")
-        if (demandK == null && qfy != null) {
-            demandK = qfy.declaredMethods.firstOrNull { isDemandOpenK(it) }
-            demandL = qfy.declaredMethods.firstOrNull { isDemandTranscriptionL(it) }
-        }
-        if (demandK == null) {
-            runCatching {
-                val key = loadObfuscatedClass(classLoader, "key") ?: return@runCatching
-                val iMethod = key.declaredMethods.firstOrNull {
-                    Modifier.isStatic(it.modifiers) && it.name == "i" && it.parameterCount == 0
-                } ?: return@runCatching
-                val demandClass = iMethod.returnType
-                demandK = demandClass.declaredMethods.firstOrNull { isDemandOpenK(it) }
-                demandL = demandClass.declaredMethods.firstOrNull { isDemandTranscriptionL(it) }
-            }
-        }
-
-        val gbo = loadObfuscatedClass(classLoader, "gbo")
-        val textFieldCtor = gbo?.declaredConstructors?.firstOrNull { isTextFieldCtor(it) }
-        val gyr = loadObfuscatedClass(classLoader, "gyr")
-        val kbdRestrictCtor = gyr?.declaredConstructors?.firstOrNull {
-            isKeyboardRestrictionCtor(it, gyr)
-        }
-        val gyq = loadObfuscatedClass(classLoader, "gyq")
-        val searchHint = gyq?.declaredMethods?.firstOrNull {
-            isSearchHintBuilder(it, gyq)
-        }
-        val kxo = loadObfuscatedClass(classLoader, "kxo")
-        val assistKbd = kxo?.declaredMethods?.firstOrNull {
-            isAssistantKeyboardEnabled(it, kxo)
-        }
-
-        ModuleLog.gearhead(
-            "GH-DRIVE-010",
-            "anchors sensors=${sensors.size} ime=${imeService?.simpleName} " +
-                "imeFrags=${imeUnlock.size} voice=${voiceCtrl?.simpleName} " +
-                "demand=${demandK?.declaringClass?.simpleName} " +
-                "locQ=${locationQ != null} park=${parkingEnum?.simpleName} " +
-                "carAppBlocked=${carAppBlocked != null} sensorIface=${sensorIface?.simpleName}",
-            always = true,
-        )
-
-        return DiscoveredTargets(
-            sensorCallbacks = sensors.toList(),
-            locationKeyboardEnabled = locationQ,
-            locationWheelSpeedNonZero = locationS,
-            locationParkingState = locationC,
-            locationSpeed = locationF,
-            parkingEnumClass = parkingEnum,
-            assistantKeyboardEnabled = assistKbd,
-            carUiTouchscreen = carUiA,
-            carUiTouchpad = carUiB,
-            carAppKeyboardBlocked = carAppBlocked,
-            carAppConstraintsClass = juv,
-            imeServiceClass = imeService,
-            imeCacheMethod = imeCache,
-            imeStartExternal = imeStart,
-            imeFragmentBase = imeFragBase,
-            imeOnStart = imeOnStart,
-            imeUnlockMethods = imeUnlock.toList(),
-            imeRotaryLockout = imeRotary,
-            imeFactory = imeFactory,
-            voiceController = voiceCtrl,
-            voiceTriggerF = voiceF,
-            voiceTriggerG = voiceG,
-            voiceSessionStart = voiceSession,
-            demandOpen = demandK,
-            demandTranscription = demandL,
-            textFieldCtor = textFieldCtor,
-            keyboardRestrictionCtor = kbdRestrictCtor,
-            searchHintMethod = searchHint,
         )
     }
 
@@ -864,7 +668,11 @@ object GearheadSignatureDiscovery {
 
     private fun isParkingEnum(clazz: Class<*>): Boolean {
         if (!clazz.isEnum) return false
-        return clazz.enumConstants?.any { (it as Enum<*>).name == "CAR_PARKED" } == true
+        // Avoid enumConstants — it runs enum static init and can poison classes like kwv
+        // (PhenotypeContext not ready during early LSPosed hook install).
+        return runCatching {
+            clazz.declaredFields.any { it.name == "CAR_PARKED" }
+        }.getOrDefault(false)
     }
 
     private fun isKeyboardCallbackInterface(clazz: Class<*>): Boolean {
@@ -1060,6 +868,112 @@ object GearheadSignatureDiscovery {
         return runCatching {
             java.util.zip.ZipFile(path).use { zip -> zip.getEntry("classes.dex") != null }
         }.getOrDefault(true)
+    }
+
+    /** ClassLoader dexElements first (multidex); DexFile(apk) alone often misses secondary dex. */
+    private fun collectDexFiles(
+        classLoader: ClassLoader,
+        apkPaths: List<String>,
+        packageName: String? = null,
+    ): List<Pair<String, DexFile>> {
+        val out = mutableListOf<Pair<String, DexFile>>()
+        val seen = mutableSetOf<Int>()
+
+        fun add(label: String, dex: DexFile?) {
+            if (dex == null) return
+            val id = System.identityHashCode(dex)
+            if (!seen.add(id)) return
+            out += label to dex
+        }
+
+        runCatching {
+            val pathListField = Class.forName("dalvik.system.BaseDexClassLoader")
+                .getDeclaredField("pathList")
+                .also { it.isAccessible = true }
+            val dexElementsField = Class.forName("dalvik.system.DexPathList")
+                .getDeclaredField("dexElements")
+                .also { it.isAccessible = true }
+            val dexFileField = Class.forName("dalvik.system.DexPathList\$Element")
+                .getDeclaredField("dexFile")
+                .also { it.isAccessible = true }
+
+            var loader: ClassLoader? = classLoader
+            while (loader != null) {
+                if (Class.forName("dalvik.system.BaseDexClassLoader").isInstance(loader)) {
+                    val pathList = pathListField.get(loader)
+                    val elements = dexElementsField.get(pathList) as? Array<*>
+                    if (elements != null) {
+                        for ((index, element) in elements.withIndex()) {
+                            if (element == null) continue
+                            add(
+                                "cl#${loader.javaClass.simpleName}[$index]",
+                                dexFileField.get(element) as? DexFile,
+                            )
+                        }
+                    }
+                }
+                loader = loader.parent
+            }
+        }
+
+        // ClassLoader often exposes only primary dex (~6803 types on Gearhead); always merge APK zip dex.
+        val beforeApk = out.size
+        val dexCache = resolveDexCacheDir("aa_ku_gearhead_dex", packageName)
+        if (dexCache == null) {
+            ModuleLog.gearhead(
+                "GH-DRIVE-010",
+                "WARN apk dex merge skipped — no cache dir",
+                always = true,
+            )
+        } else {
+            for (path in apkPaths) {
+                if (!path.endsWith(".apk") || !apkContainsDex(path)) continue
+                runCatching {
+                    java.util.zip.ZipFile(path).use { zip ->
+                        val dexNames = zip.entries().asSequence()
+                            .map { it.name }
+                            .filter { it == "classes.dex" || it.matches(Regex("""classes\d+\.dex""")) }
+                            .toList()
+                        for (dexName in dexNames) {
+                            val entry = zip.getEntry(dexName) ?: continue
+                            val outFile = File(dexCache, "${File(path).name}_$dexName")
+                            if (!outFile.exists() || outFile.length() != entry.size) {
+                                zip.getInputStream(entry).use { input ->
+                                    outFile.outputStream().use { input.copyTo(it) }
+                                }
+                            }
+                            if (outFile.canWrite()) {
+                                outFile.setReadOnly()
+                            }
+                            add("${File(path).name}/$dexName", DexFile(outFile.absolutePath))
+                        }
+                    }
+                }.onFailure { error ->
+                    ModuleLog.gearhead(
+                        "GH-DRIVE-010",
+                        "apk dex extract failed ${File(path).name}: ${error.message}",
+                        always = true,
+                    )
+                }
+            }
+            ModuleLog.gearhead(
+                "GH-DRIVE-010",
+                "apk dex merged=${out.size - beforeApk} total=${out.size}",
+                always = true,
+            )
+        }
+        return out
+    }
+
+    internal fun resolveDexCacheDir(subdir: String, packageName: String? = null): File? {
+        resolveHostContext()?.let { ctx ->
+            val base = ctx.codeCacheDir ?: ctx.cacheDir ?: ctx.filesDir
+            return File(base, subdir).apply { mkdirs() }
+        }
+        val pkg = packageName ?: return null
+        val filesDir = File("/data/user/0/$pkg/files")
+        if (!filesDir.exists() && !filesDir.mkdirs()) return null
+        return File(filesDir, subdir).apply { mkdirs() }
     }
 
     fun resolveHostContext(): Context? {

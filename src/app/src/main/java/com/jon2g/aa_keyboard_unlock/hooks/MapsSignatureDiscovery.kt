@@ -224,7 +224,7 @@ object MapsSignatureDiscovery {
 
         // Prefer ClassLoader dexElements (all multidex already mapped). DexFile(apkPath) often
         // only enumerates classes.dex and misses UiState/controllers in classes5+.
-        val dexFiles = collectDexFiles(ctx.classLoader, paths)
+        val dexFiles = collectDexFiles(ctx.classLoader, paths, ctx.packageName)
         ModuleLog.maps(
             "MAPS-DRIVE-010",
             "dex sources=${dexFiles.size} (classLoader+apk multidex)",
@@ -315,7 +315,7 @@ object MapsSignatureDiscovery {
                 .take(16),
             rekOverlayTypes = allRek.sortedByDescending { scoreRekType(it) }.take(20),
             carImeTypes = carImeTypes.sortedBy { it.name }.take(10),
-            searchHeaderTaps = rankedHeaderTaps,
+            searchHeaderTaps = headerTaps.toList(),
             carParameterMethods = carParamMethods
                 .filter { isSafeKeyboardCarParamsGetter(it) }
                 .distinctBy { "${it.declaringClass.name}#${it.name}" }
@@ -359,7 +359,7 @@ object MapsSignatureDiscovery {
             resolveUiStateViaStringAnchor(ctx, paths, uiStateTypes, headerTaps)
         }
 
-        applyShapeValidatedFallbacks(ctx.classLoader, hints, headerTaps, uiStateTypes, headerCtors)
+        applyShapeValidatedFallbacks(ctx, hints, headerTaps, uiStateTypes, headerCtors)
 
         val ranked = headerTaps
             .sortedByDescending { scoreSearchHeaderTap(it, uiStateTypes) }
@@ -381,84 +381,175 @@ object MapsSignatureDiscovery {
     }
 
     /**
-     * Last-resort candidates when string/dex discovery left a critical gap.
-     * Short names are probes only — rejected unless shape validation passes.
+     * Fill critical gaps after cache/string scan by walking dex for matching API shapes only.
+     * No obfuscated short-name probes — names in logs are discovered at runtime, not baked in.
      */
     private fun applyShapeValidatedFallbacks(
-        classLoader: ClassLoader,
+        ctx: HookContext,
         hints: MutableList<Method>,
         headerTaps: MutableSet<SearchHeaderTap>,
         uiStateTypes: MutableSet<Class<*>>,
         headerCtors: MutableList<Constructor<*>>,
     ) {
-        val uiStateProbes = listOf("qok", "qnp")
-        val headerProbes = listOf("qoq", "qnu")
-        val hintOwnerProbes = listOf("onl")
+        inferUiStateFromHeaderFields(headerTaps, uiStateTypes, headerCtors)
 
-        if (uiStateTypes.isEmpty()) {
-            for (name in uiStateProbes) {
-                val clazz = loadObfuscatedClass(classLoader, name) ?: continue
-                if (!clazz.declaredConstructors.any {
+        if (uiStateTypes.isNotEmpty()) {
+            for (tap in headerTaps.toList()) {
+                if (!headerHoldsUiState(tap.headerClass, uiStateTypes)) continue
+                ModuleLog.maps(
+                    "MAPS-DRIVE-010",
+                    "shape-validated header ${tap.headerClass.simpleName}.${tap.tapMethod.name}()",
+                    always = true,
+                )
+            }
+            if (!headerTaps.any { headerHoldsUiState(it.headerClass, uiStateTypes) }) {
+                discoverUiStateLinkedHeaders(ctx, uiStateTypes, headerTaps)
+            }
+        }
+
+        if (!hasDrivingHint(hints)) {
+            discoverDrivingHintFromDex(ctx, hints)
+        }
+    }
+
+    private fun inferUiStateFromHeaderFields(
+        headerTaps: Collection<SearchHeaderTap>,
+        uiStateTypes: MutableSet<Class<*>>,
+        headerCtors: MutableList<Constructor<*>>,
+    ) {
+        for (tap in headerTaps) {
+            runCatching {
+                for (field in tap.headerClass.declaredFields) {
+                    if (Modifier.isStatic(field.modifiers)) continue
+                    val fieldType = field.type
+                    val uiCtor = fieldType.declaredConstructors.firstOrNull {
+                        MapsCarUiStatePatches.matchesCarSearchUiStateConstructor(it)
+                    } ?: continue
+                    if (uiStateTypes.add(fieldType)) {
+                        headerCtors += uiCtor
+                        ModuleLog.maps(
+                            "MAPS-DRIVE-010",
+                            "shape-validated UiState via header field ${fieldType.simpleName}",
+                            always = true,
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun discoverUiStateFromDex(
+        ctx: HookContext,
+        uiStateTypes: MutableSet<Class<*>>,
+        headerCtors: MutableList<Constructor<*>>,
+    ) {
+        val paths = ctx.sourcePaths.ifEmpty { listOf(ctx.sourcePath) }
+        val dexFiles = collectDexFiles(ctx.classLoader, paths, ctx.packageName)
+        val seen = mutableSetOf<String>()
+        for ((_, dex) in dexFiles) {
+            runCatching {
+                val entries = dex.entries()
+                while (entries.hasMoreElements()) {
+                    val name = normalizeDexClassName(entries.nextElement())
+                    if (!isObfuscatedMapsClass(name)) continue
+                    if (!seen.add(name)) continue
+                    val clazz = loadObfuscatedClass(ctx.classLoader, name) ?: continue
+                    if (clazz.isInterface || isCoroutineLike(clazz)) continue
+                    val uiCtor = clazz.declaredConstructors.firstOrNull {
                         MapsCarUiStatePatches.isCarSearchUiStateConstructor(it.parameterTypes)
+                    } ?: continue
+                    if (uiStateTypes.add(clazz)) {
+                        headerCtors += uiCtor
+                        ModuleLog.maps(
+                            "MAPS-DRIVE-010",
+                            "shape-validated UiState ${clazz.simpleName}",
+                            always = true,
+                        )
                     }
-                ) {
-                    continue
                 }
-                uiStateTypes += clazz
-                headerCtors += clazz.declaredConstructors.filter {
-                    MapsCarUiStatePatches.isCarSearchUiStateConstructor(it.parameterTypes)
-                }
-                ModuleLog.maps(
-                    "MAPS-DRIVE-010",
-                    "shape-validated UiState fallback ${clazz.simpleName}",
-                    always = true
-                )
             }
         }
+    }
 
-        val hasUiStateHeader = headerTaps.any { headerHoldsUiState(it.headerClass, uiStateTypes) }
-        if (!hasUiStateHeader) {
-            for (name in headerProbes) {
-                val clazz = loadObfuscatedClass(classLoader, name) ?: continue
-                val tap = findSearchHeaderTap(clazz) ?: continue
-                if (!isValidatedCarSearchHeader(clazz, uiStateTypes)) continue
-                headerTaps.add(tap)
-                ModuleLog.maps(
-                    "MAPS-DRIVE-010",
-                    "shape-validated header fallback ${clazz.simpleName}.${tap.tapMethod.name}()",
-                    always = true
-                )
-            }
-        }
-
-        val hasDrivingHint = hints.any { method ->
-            method.parameterTypes.firstOrNull()?.name == Context::class.java.name &&
-                method.parameterTypes.count {
-                    it == Boolean::class.javaPrimitiveType || it == Boolean::class.java
-                } >= 2
-        }
-        if (!hasDrivingHint) {
-            val booleanPrimitive = Boolean::class.javaPrimitiveType!!
-            for (name in hintOwnerProbes) {
-                val clazz = loadObfuscatedClass(classLoader, name) ?: continue
-                for (method in clazz.declaredMethods) {
-                    if (!Modifier.isStatic(method.modifiers)) continue
-                    if (method.returnType != String::class.java) continue
-                    if (method.parameterTypes.firstOrNull()?.name != Context::class.java.name) continue
-                    val bools = method.parameterTypes.count {
-                        it == booleanPrimitive || it == Boolean::class.java
+    private fun discoverUiStateLinkedHeaders(
+        ctx: HookContext,
+        uiStateTypes: Set<Class<*>>,
+        headerTaps: MutableSet<SearchHeaderTap>,
+    ) {
+        val paths = ctx.sourcePaths.ifEmpty { listOf(ctx.sourcePath) }
+        val dexFiles = collectDexFiles(ctx.classLoader, paths, ctx.packageName)
+        val seen = mutableSetOf<String>()
+        for ((_, dex) in dexFiles) {
+            runCatching {
+                val entries = dex.entries()
+                while (entries.hasMoreElements()) {
+                    val name = normalizeDexClassName(entries.nextElement())
+                    if (!isObfuscatedMapsClass(name)) continue
+                    if (!seen.add(name)) continue
+                    val clazz = loadObfuscatedClass(ctx.classLoader, name) ?: continue
+                    if (clazz.isInterface || isCoroutineLike(clazz)) continue
+                    if (!headerHoldsUiState(clazz, uiStateTypes)) continue
+                    val tap = findSearchHeaderTap(clazz) ?: continue
+                    if (headerTaps.any { it.headerClass == clazz && it.tapMethod.name == tap.tapMethod.name }) {
+                        continue
                     }
-                    if (bools < 2) continue
-                    hints += method
+                    headerTaps.add(tap)
                     ModuleLog.maps(
                         "MAPS-DRIVE-010",
-                        "shape-validated hint fallback ${clazz.simpleName}.${method.name}()",
-                        always = true
+                        "shape-validated header ${clazz.simpleName}.${tap.tapMethod.name}()",
+                        always = true,
                     )
                 }
             }
         }
     }
+
+    private fun discoverDrivingHintFromDex(
+        ctx: HookContext,
+        hints: MutableList<Method>,
+    ) {
+        val paths = ctx.sourcePaths.ifEmpty { listOf(ctx.sourcePath) }
+        val dexFiles = collectDexFiles(ctx.classLoader, paths, ctx.packageName)
+        val booleanPrimitive = Boolean::class.javaPrimitiveType!!
+        val seen = mutableSetOf<String>()
+        for ((_, dex) in dexFiles) {
+            if (hasDrivingHint(hints)) return
+            runCatching {
+                val entries = dex.entries()
+                while (entries.hasMoreElements()) {
+                    val name = normalizeDexClassName(entries.nextElement())
+                    if (!isObfuscatedMapsClass(name)) continue
+                    if (!seen.add(name)) continue
+                    val clazz = loadObfuscatedClass(ctx.classLoader, name) ?: continue
+                    if (clazz.isInterface || isCoroutineLike(clazz)) continue
+                    for (method in clazz.declaredMethods) {
+                        if (!Modifier.isStatic(method.modifiers)) continue
+                        if (method.returnType != String::class.java) continue
+                        if (method.parameterTypes.firstOrNull()?.name != Context::class.java.name) continue
+                        val bools = method.parameterTypes.count {
+                            it == booleanPrimitive || it == Boolean::class.java
+                        }
+                        if (bools < 2) continue
+                        hints += method
+                        ModuleLog.maps(
+                            "MAPS-DRIVE-010",
+                            "shape-validated hint ${clazz.simpleName}.${method.name}()",
+                            always = true,
+                        )
+                        return
+                    }
+                }
+            }
+        }
+    }
+
+    private fun hasDrivingHint(hints: List<Method>): Boolean =
+        hints.any { method ->
+            method.parameterTypes.firstOrNull()?.name == Context::class.java.name &&
+                method.parameterTypes.count {
+                    it == Boolean::class.javaPrimitiveType || it == Boolean::class.java
+                } >= 2
+        }
 
     private fun isValidatedCarSearchHeader(
         clazz: Class<*>,
@@ -583,6 +674,7 @@ object MapsSignatureDiscovery {
     private fun collectDexFiles(
         classLoader: ClassLoader,
         apkPaths: List<String>,
+        packageName: String? = null,
     ): List<Pair<String, DexFile>> {
         val out = mutableListOf<Pair<String, DexFile>>()
         val seen = mutableSetOf<Int>()
@@ -624,40 +716,51 @@ object MapsSignatureDiscovery {
             }
         }
 
-        if (out.isNotEmpty()) return out
-
-        val cacheDir = runCatching {
-            Reflect.callStaticMethod(
-                Class.forName("android.app.ActivityThread"),
-                "currentApplication",
-            )?.let { app ->
-                Reflect.callMethod(app, "getCodeCacheDir") as? File
-            }
-        }.getOrNull() ?: return out
-
-        val dexCache = File(cacheDir, "aa_ku_maps_dex").apply { mkdirs() }
-        for (path in apkPaths) {
-            if (!path.endsWith(".apk") || !apkContainsDex(path)) continue
-            runCatching {
-                ZipFile(path).use { zip ->
-                    val dexNames = zip.entries().asSequence()
-                        .map { it.name }
-                        .filter { it == "classes.dex" || it.matches(Regex("""classes\d+\.dex""")) }
-                        .toList()
-                    for (dexName in dexNames) {
-                        val entry = zip.getEntry(dexName) ?: continue
-                        val outFile = File(dexCache, "${File(path).name}_$dexName")
-                        if (!outFile.exists() || outFile.length() != entry.size) {
-                            zip.getInputStream(entry).use { input ->
-                                outFile.outputStream().use { input.copyTo(it) }
+        // ClassLoader may omit secondary dex; always merge classes*.dex extracted from APK zips.
+        val beforeApk = out.size
+        val dexCache = GearheadSignatureDiscovery.resolveDexCacheDir("aa_ku_maps_dex", packageName)
+        if (dexCache == null) {
+            ModuleLog.maps(
+                "MAPS-DRIVE-010",
+                "WARN apk dex merge skipped — no cache dir",
+                always = true,
+            )
+        } else {
+            for (path in apkPaths) {
+                if (!path.endsWith(".apk") || !apkContainsDex(path)) continue
+                runCatching {
+                    ZipFile(path).use { zip ->
+                        val dexNames = zip.entries().asSequence()
+                            .map { it.name }
+                            .filter { it == "classes.dex" || it.matches(Regex("""classes\d+\.dex""")) }
+                            .toList()
+                        for (dexName in dexNames) {
+                            val entry = zip.getEntry(dexName) ?: continue
+                            val outFile = File(dexCache, "${File(path).name}_$dexName")
+                            if (!outFile.exists() || outFile.length() != entry.size) {
+                                zip.getInputStream(entry).use { input ->
+                                    outFile.outputStream().use { input.copyTo(it) }
+                                }
                             }
+                            if (outFile.canWrite()) {
+                                outFile.setReadOnly()
+                            }
+                            add("${File(path).name}/$dexName", DexFile(outFile.absolutePath))
                         }
-                        add("${File(path).name}/$dexName", DexFile(outFile.absolutePath))
                     }
+                }.onFailure { error ->
+                    ModuleLog.maps(
+                        "MAPS-DRIVE-010",
+                        "apk dex extract failed ${File(path).name}: ${error.message}",
+                        always = true,
+                    )
                 }
-            }.onFailure {
-                // fall through — caller records dex open failures when enumerating
             }
+            ModuleLog.maps(
+                "MAPS-DRIVE-010",
+                "apk dex merged=${out.size - beforeApk} total=${out.size}",
+                always = true,
+            )
         }
         return out
     }
@@ -1026,6 +1129,7 @@ object MapsSignatureDiscovery {
         // rkw-shaped keyboard opener is often an interface (d + e(...)) without View anchors.
         if (rekType != null) {
             when {
+                isRlrKeyboardOpener(rekType) -> score += 200
                 isRekOverlayTypeStrict(rekType) -> score += 10
                 isRekOverlayTypeLoose(rekType) -> score += 8
                 MapsInstallProbe.isRekLikeType(rekType) -> score += 12
