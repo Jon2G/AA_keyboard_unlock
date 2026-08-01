@@ -839,13 +839,25 @@ object GearheadHooks {
     }
 
     private fun openProjectedImeViaFactory(classLoader: ClassLoader): Boolean {
+        val ime = activeImeService?.get()
+            ?: findRunningImeService(classLoader, targets.imeServiceClass)
+            ?: return false
         return runCatching {
-            val config = targets.imeUnlockMethods.firstOrNull()?.declaringClass?.let {
-                Reflect.newInstance(it)
-            } ?: return false
-            Reflect.setBooleanField(config, "c", false)
-            Reflect.callMethod(config, "d")
-            ModuleLog.gearhead("GH-MAPS-003", "factory fragment.d() projection keyboard", always = true)
+            prepareImeForExternalKeyboard(ime)
+            val factory = targets.imeFactory
+            val fragment = when {
+                factory != null && !Modifier.isStatic(factory.modifiers) &&
+                    factory.declaringClass.isInstance(ime) -> factory.invoke(ime)
+                factory != null && Modifier.isStatic(factory.modifiers) -> factory.invoke(null)
+                else -> Reflect.callMethod(ime, "f")
+            } ?: run {
+                ModuleLog.gearhead("GH-MAPS-004", "factory fragment null on IME service", always = true)
+                return false
+            }
+            Reflect.setBooleanField(fragment, "c", false)
+            Reflect.callMethod(fragment, "d")
+            activeInputFragment = WeakReference(fragment)
+            ModuleLog.gearhead("GH-MAPS-003", "service fragment.d() projection keyboard", always = true)
             true
         }.getOrElse {
             ModuleLog.gearhead(

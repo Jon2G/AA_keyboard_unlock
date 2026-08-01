@@ -285,11 +285,15 @@ object GearheadSignatureDiscovery {
         val fragmentClass = runCatching {
             Reflect.findClass("androidx.fragment.app.Fragment", ctx.classLoader)
         }.getOrNull() ?: runCatching {
+            Reflect.findClass("android.support.v4.app.Fragment", ctx.classLoader)
+        }.getOrNull() ?: runCatching {
             Reflect.findClass("android.app.Fragment", ctx.classLoader)
         }.getOrNull()
-        val sensorIface = loadObfuscatedClass(ctx.classLoader, "qqf")
-        val demandIface = loadObfuscatedClass(ctx.classLoader, "kvp")
-        val voiceIface = loadObfuscatedClass(ctx.classLoader, "kvj")
+        val sensorIface = loadObfuscatedClass(ctx.classLoader, "qqe")
+        val demandIface = loadObfuscatedClass(ctx.classLoader, "kvv")
+            ?: loadObfuscatedClass(ctx.classLoader, "kvp")
+        val voiceIface = loadObfuscatedClass(ctx.classLoader, "kvp")
+            ?: loadObfuscatedClass(ctx.classLoader, "kvj")
 
         // Anchor-first seeds (stable FQCNs / known 17.3 shapes) before loose dex heuristics.
         val seeded = resolveAnchors(ctx.classLoader, carRegionId, voiceSessionConfig, sensorIface)
@@ -508,7 +512,7 @@ object GearheadSignatureDiscovery {
                 val f = clazz.declaredMethods.firstOrNull {
                     it.parameterCount == 0 &&
                         it.returnType == java.lang.Float::class.java &&
-                        it.name == "f"
+                        (it.name == "f" || it.name == "d")
                 }
                 if (q != null && s != null && c != null) {
                     locationQ = q
@@ -522,26 +526,30 @@ object GearheadSignatureDiscovery {
 
         imeFragBase?.let { base ->
             for (name in seen) {
-                val clazz = loadObfuscatedClass(ctx.classLoader, name) ?: continue
-                if (!base.isAssignableFrom(clazz) || Modifier.isAbstract(clazz.modifiers)) continue
-                clazz.declaredMethods.firstOrNull {
-                    it.name == "d" && it.parameterCount == 0 && !Modifier.isAbstract(it.modifiers)
-                }?.let { imeUnlock += it }
-                clazz.declaredMethods.firstOrNull {
-                    it.name == "k" &&
-                        it.parameterCount == 0 &&
-                        it.returnType == Boolean::class.javaPrimitiveType
-                }?.let { imeRotary = it }
+                runCatching {
+                    val clazz = loadObfuscatedClass(ctx.classLoader, name) ?: return@runCatching
+                    if (!base.isAssignableFrom(clazz) || Modifier.isAbstract(clazz.modifiers)) return@runCatching
+                    clazz.declaredMethods.firstOrNull {
+                        it.name == "d" && it.parameterCount == 0 && !Modifier.isAbstract(it.modifiers)
+                    }?.let { imeUnlock += it }
+                    clazz.declaredMethods.firstOrNull {
+                        it.name == "k" &&
+                            it.parameterCount == 0 &&
+                            it.returnType == Boolean::class.javaPrimitiveType
+                    }?.let { imeRotary = it }
+                }
             }
             for (name in seen) {
-                val clazz = loadObfuscatedClass(ctx.classLoader, name) ?: continue
-                clazz.declaredMethods.firstOrNull {
-                    it.parameterCount == 0 &&
-                        it.returnType == base &&
-                        !Modifier.isStatic(it.modifiers) &&
-                        (it.name == "e" || Modifier.isAbstract(it.modifiers).not())
-                }?.let {
-                    if (imeFactory == null || it.name == "e") imeFactory = it
+                runCatching {
+                    val clazz = loadObfuscatedClass(ctx.classLoader, name) ?: return@runCatching
+                    clazz.declaredMethods.firstOrNull {
+                        it.parameterCount == 0 &&
+                            it.returnType == base &&
+                            !Modifier.isStatic(it.modifiers) &&
+                            (it.name == "e" || Modifier.isAbstract(it.modifiers).not())
+                    }?.let {
+                        if (imeFactory == null || it.name == "e") imeFactory = it
+                    }
                 }
             }
         }
@@ -623,30 +631,34 @@ object GearheadSignatureDiscovery {
         sensorIface: Class<*>?,
     ): DiscoveredTargets {
         val sensors = linkedSetOf<Method>()
-        for (name in listOf("lhl", "lhv")) {
+        for (name in listOf("lic", "lhs", "lhl", "lhv")) {
             val clazz = loadObfuscatedClass(classLoader, name) ?: continue
+            if (sensorIface != null && !sensorIface.isAssignableFrom(clazz)) continue
             clazz.declaredMethods.filter {
                 isSensorCallback(it) && !Modifier.isAbstract(it.modifiers)
             }.forEach { sensors += it }
         }
 
-        val parkingEnum = loadObfuscatedClass(classLoader, "lhb")?.takeIf { isParkingEnum(it) }
-        val lhu = loadObfuscatedClass(classLoader, "lhu")
-        val locationQ = lhu?.declaredMethods?.firstOrNull {
+        val parkingEnum = loadObfuscatedClass(classLoader, "lhi")?.takeIf { isParkingEnum(it) }
+            ?: loadObfuscatedClass(classLoader, "lhb")?.takeIf { isParkingEnum(it) }
+        val locationHost = loadObfuscatedClass(classLoader, "lib")
+            ?: loadObfuscatedClass(classLoader, "lhu")
+        val locationQ = locationHost?.declaredMethods?.firstOrNull {
             it.name == "q" && it.parameterCount == 0 &&
                 it.returnType == Boolean::class.javaPrimitiveType
         }
-        val locationS = lhu?.declaredMethods?.firstOrNull {
+        val locationS = locationHost?.declaredMethods?.firstOrNull {
             it.name == "s" && it.parameterCount == 0 &&
                 it.returnType == Boolean::class.javaPrimitiveType
         }
-        val locationC = lhu?.declaredMethods?.firstOrNull {
+        val locationC = locationHost?.declaredMethods?.firstOrNull {
             it.name == "c" && it.parameterCount == 0 && parkingEnum != null &&
                 it.returnType == parkingEnum
         }
-        val locationF = lhu?.declaredMethods?.firstOrNull {
-            it.name == "f" && it.parameterCount == 0 &&
-                it.returnType == java.lang.Float::class.java
+        val locationF = locationHost?.declaredMethods?.firstOrNull {
+            it.parameterCount == 0 &&
+                it.returnType == java.lang.Float::class.java &&
+                (it.name == "d" || it.name == "f")
         }
 
         val jqt = loadObfuscatedClass(classLoader, "jqt")
@@ -696,13 +708,14 @@ object GearheadSignatureDiscovery {
             it.name == "h" && it.parameterCount == 0 && it.returnType == Void.TYPE
         }?.let { imeStart = it }
 
-        val imeFragBase = loadObfuscatedClass(classLoader, "xaw")?.takeIf { isImeFragmentBase(it) }
+        val imeFragBase = loadObfuscatedClass(classLoader, "xba")?.takeIf { isImeFragmentBase(it) }
+            ?: loadObfuscatedClass(classLoader, "xaw")?.takeIf { isImeFragmentBase(it) }
         val imeOnStart = imeFragBase?.declaredMethods?.firstOrNull {
             it.name == "onStart" && it.parameterCount == 0
         }
         val imeUnlock = linkedSetOf<Method>()
         var imeRotary: Method? = null
-        for (name in listOf("xbg", "xbp")) {
+        for (name in listOf("xbk", "xbt", "xbg", "xbp")) {
             val clazz = loadObfuscatedClass(classLoader, name) ?: continue
             clazz.declaredMethods.firstOrNull {
                 it.name == "d" && it.parameterCount == 0 && !Modifier.isAbstract(it.modifiers)
@@ -716,15 +729,17 @@ object GearheadSignatureDiscovery {
             it.name == "e" && it.parameterCount == 0
         }
 
-        // Voice: prefer kxi / any kvj implementor with VoiceSessionConfig methods
+        // Voice: kxp (17.4) / kxi (17.3) implement kvp with VoiceSessionConfig methods
         var voiceCtrl: Class<*>? = null
         var voiceF: Method? = null
         var voiceG: Method? = null
         var voiceSession: Method? = null
+        val voiceIface = loadObfuscatedClass(classLoader, "kvp")
+            ?: loadObfuscatedClass(classLoader, "kvj")
         if (voiceSessionConfig != null) {
-            for (name in listOf("kxi")) {
+            for (name in listOf("kxp", "kxi")) {
                 val clazz = loadObfuscatedClass(classLoader, name) ?: continue
-                if (!isVoiceControllerClass(clazz, voiceSessionConfig, null)) continue
+                if (!isVoiceControllerClass(clazz, voiceSessionConfig, voiceIface)) continue
                 voiceCtrl = clazz
                 voiceF = clazz.declaredMethods.firstOrNull { isVoiceTriggerF(it) }
                 voiceG = clazz.declaredMethods.firstOrNull { isVoiceTriggerG(it) }
@@ -734,11 +749,16 @@ object GearheadSignatureDiscovery {
             }
         }
 
-        // Demand: qfy implements kvp; also accept key.i() return type
+        // Demand: qfx implements kvv on 17.4; qfy on 17.3
         var demandK: Method? = null
         var demandL: Method? = null
+        val qfx = loadObfuscatedClass(classLoader, "qfx")
+        if (qfx != null) {
+            demandK = qfx.declaredMethods.firstOrNull { isDemandOpenK(it) }
+            demandL = qfx.declaredMethods.firstOrNull { isDemandTranscriptionL(it) }
+        }
         val qfy = loadObfuscatedClass(classLoader, "qfy")
-        if (qfy != null) {
+        if (demandK == null && qfy != null) {
             demandK = qfy.declaredMethods.firstOrNull { isDemandOpenK(it) }
             demandL = qfy.declaredMethods.firstOrNull { isDemandTranscriptionL(it) }
         }
@@ -772,8 +792,10 @@ object GearheadSignatureDiscovery {
         ModuleLog.gearhead(
             "GH-DRIVE-010",
             "anchors sensors=${sensors.size} ime=${imeService?.simpleName} " +
-                "voice=${voiceCtrl?.simpleName} demand=${demandK?.declaringClass?.simpleName} " +
-                "locQ=${locationQ != null} sensorIface=${sensorIface?.simpleName}",
+                "imeFrags=${imeUnlock.size} voice=${voiceCtrl?.simpleName} " +
+                "demand=${demandK?.declaringClass?.simpleName} " +
+                "locQ=${locationQ != null} park=${parkingEnum?.simpleName} " +
+                "carAppBlocked=${carAppBlocked != null} sensorIface=${sensorIface?.simpleName}",
             always = true,
         )
 
@@ -811,7 +833,7 @@ object GearheadSignatureDiscovery {
 
     private fun looksLikeDemandController(clazz: Class<*>, demandIface: Class<*>?): Boolean {
         if (demandIface != null && demandIface.isAssignableFrom(clazz)) return true
-        // qfy-shaped: Context field + k/l/j/m methods
+        // qfx/qfy-shaped: Context field + k/l/j/m methods
         val names = clazz.declaredMethods.map { it.name }.toSet()
         if (!("k" in names && "l" in names && "j" in names && "m" in names)) return false
         return clazz.declaredFields.any {

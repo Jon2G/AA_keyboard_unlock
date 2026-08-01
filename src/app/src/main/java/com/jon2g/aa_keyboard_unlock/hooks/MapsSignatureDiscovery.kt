@@ -391,8 +391,8 @@ object MapsSignatureDiscovery {
         uiStateTypes: MutableSet<Class<*>>,
         headerCtors: MutableList<Constructor<*>>,
     ) {
-        val uiStateProbes = listOf("qnp")
-        val headerProbes = listOf("qnu")
+        val uiStateProbes = listOf("qok", "qnp")
+        val headerProbes = listOf("qoq", "qnu")
         val hintOwnerProbes = listOf("onl")
 
         if (uiStateTypes.isEmpty()) {
@@ -672,7 +672,12 @@ object MapsSignatureDiscovery {
         uiStateTypes: MutableSet<Class<*>>,
         headerTaps: MutableSet<SearchHeaderTap>,
     ) {
-        val needles = listOf("isMicRestricted=", "isKeyboardRestricted=")
+        val needles = listOf(
+            "UiState(searchQuery=",
+            "DistractionState(isKeyboardRestricted=",
+            "isMicRestricted=",
+            "isKeyboardRestricted=",
+        )
         val candidates = linkedSetOf<String>()
         for (path in paths) {
             DexHooks.findClassesReferencingStrings(path, needles, limit = 120).forEach { (name, _) ->
@@ -907,6 +912,8 @@ object MapsSignatureDiscovery {
             !Modifier.isStatic(field.modifiers) && isRekOverlayTypeLoose(field.type)
         } ?: clazz.declaredFields.firstOrNull { field ->
             !Modifier.isStatic(field.modifiers) && MapsInstallProbe.isRekLikeType(field.type)
+        } ?: clazz.declaredFields.firstOrNull { field ->
+            !Modifier.isStatic(field.modifiers) && isRlrKeyboardOpener(field.type)
         } ?: return null
 
         return SearchHeaderTap(clazz, tapMethod, rekField.name)
@@ -918,7 +925,22 @@ object MapsSignatureDiscovery {
     }
 
     fun isRekFieldType(type: Class<*>): Boolean =
-        isRekOverlayTypeLoose(type) || MapsInstallProbe.isRekLikeType(type)
+        isRekOverlayTypeLoose(type) ||
+            MapsInstallProbe.isRekLikeType(type) ||
+            isRlrKeyboardOpener(type)
+
+    /** Maps 26.31+ destination-search header holds an [rlr] keyboard opener (d/e/…), not rek. */
+    private fun isRlrKeyboardOpener(type: Class<*>): Boolean {
+        if (!type.isInterface) return false
+        val methods = type.declaredMethods
+        val hasD = methods.any {
+            it.name == "d" && it.parameterCount == 0 && it.returnType == Void.TYPE
+        }
+        val hasE = methods.any {
+            it.name == "e" && it.parameterCount >= 1 && it.returnType == Void.TYPE
+        }
+        return hasD && hasE
+    }
 
     fun findRekFieldOnHeader(header: Any): Pair<String, Any>? {
         for (field in header.javaClass.declaredFields) {

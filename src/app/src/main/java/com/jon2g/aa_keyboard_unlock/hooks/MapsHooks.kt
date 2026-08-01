@@ -407,7 +407,6 @@ object MapsHooks {
         val micPassthrough = object : MethodHook() {
             override fun beforeHookedMethod(param: HookParam) {
                 if (!hooksActive()) return
-                if (!MapsCarContext.isCarProcess() && !MapsCarContext.isProjectedMapsUiActive()) return
                 mapsMicVoiceActive.set(true)
                 ModuleLog.maps("MAPS-MIC-001", "${param.method.declaringClass.simpleName}.${param.method.name}() mic", always = true)
             }
@@ -437,7 +436,6 @@ object MapsHooks {
             val keyboardTap = object : MethodHook() {
                 override fun beforeHookedMethod(param: HookParam) {
                     if (!hooksActive()) return
-                    if (!MapsCarContext.isCarProcess() && !MapsCarContext.isProjectedMapsUiActive()) return
                     val headerClass = param.thisObject?.javaClass?.name ?: "?"
                     ModuleLog.maps("MAPS-DRIVE-006", "$headerClass.${tap.tapMethod.name}() search tap", always = true)
                     val rek = runCatching {
@@ -766,7 +764,10 @@ object MapsHooks {
             }
             val receiver = object : BroadcastReceiver() {
                 override fun onReceive(context: Context, intent: Intent) {
-                    if (!hooksActive()) return
+                    // Gearhead → Maps IME broadcasts must not be gated on lifecycle counters;
+                    // GhostActivity resume hooks can lag behind the broadcast.
+                    if (!ModulePrefs.isEnabled()) return
+                    MapsCarContext.markProjectedKeyboardRequested()
                     when (intent.action) {
                         MapsNativeIme.ACTION_PREPARE -> {
                             ModuleLog.maps("MAPS-002", "broadcast PREPARE_MAPS_NATIVE_IME", always = true)
@@ -886,41 +887,100 @@ object MapsHooks {
         runCatching {
             val atClass = Class.forName("android.app.ActivityThread")
             val thread = Reflect.callStaticMethod(atClass, "currentActivityThread")
-            val activities = Reflect.getObjectField(thread, "mActivities") as? Map<*, *> ?: return null
+            val activities = Reflect.getObjectField(thread, "mActivities") as? Map<*, *> ?: emptyMap<Any, Any>()
             for (record in activities.values) {
                 val activity = Reflect.getObjectField(record, "activity") as? Activity ?: continue
-                if (!activity.javaClass.name.contains("GhostActivity")) continue
+                discoverRekFromRoot(activity, via = activity.javaClass.simpleName)?.let { return it }
+            }
+            val services = Reflect.getObjectField(thread, "mServices") as? Map<*, *> ?: emptyMap<Any, Any>()
+            for (record in services.values) {
+                val service = Reflect.getObjectField(record, "service") ?: continue
+                discoverRekFromRoot(service, via = service.javaClass.simpleName)?.let { return it }
+            }
+            discoverRekViaKnownHeaderTypes()?.let { return it }
+        }.onFailure {
+            debug("discoverRek failed: ${it.message}")
+        }
+        return null
+    }
 
-                findSearchEditText(activity)?.let { editText ->
-                    scanForRekMatchingEditText(activity, editText, depth = 0, maxDepth = 7)?.let { rek ->
-                        ModuleLog.maps(
-                            "MAPS-000",
-                            "discovered rek via search EditText (${rek.javaClass.simpleName})",
-                            always = true
-                        )
-                        return rek
-                    }
-                    ModuleLog.maps("MAPS-000", "search EditText visible — scanning for rek", always = true)
-                }
-
-                discoverQhfHeader(activity)?.let { qhf ->
-                    cacheRekFromQhf(qhf)?.let { rek ->
-                        ModuleLog.maps("MAPS-000", "discovered rek via qhf.b", always = true)
-                        return rek
-                    }
-                }
-
-                scanForRek(activity, depth = 0, maxDepth = 7)?.let { rek ->
+    private fun discoverRekFromRoot(root: Any, via: String): Any? {
+        if (root is Activity) {
+            findSearchEditText(root)?.let { editText ->
+                scanForRekMatchingEditText(root, editText, depth = 0, maxDepth = 7)?.let { rek ->
                     ModuleLog.maps(
                         "MAPS-000",
-                        "discovered rek via activity scan (${rek.javaClass.simpleName})",
+                        "discovered rek via search EditText on $via (${rek.javaClass.simpleName})",
                         always = true
                     )
                     return rek
                 }
+                ModuleLog.maps("MAPS-000", "search EditText on $via — scanning for rek", always = true)
             }
-        }.onFailure {
-            debug("discoverRek failed: ${it.message}")
+        }
+        discoverQhfHeader(root)?.let { qhf ->
+            cacheRekFromQhf(qhf)?.let { rek ->
+                ModuleLog.maps("MAPS-000", "discovered rek via header on $via", always = true)
+                return rek
+            }
+        }
+        scanForRek(root, depth = 0, maxDepth = 8)?.let { rek ->
+            ModuleLog.maps(
+                "MAPS-000",
+                "discovered rek via $via scan (${rek.javaClass.simpleName})",
+                always = true
+            )
+            return rek
+        }
+        return null
+    }
+
+    /** Walk live objects for a discovered qoq-style header and return field-b opener. */
+    private fun discoverRekViaKnownHeaderTypes(): Any? {
+        if (!::targets.isInitialized) return null
+        val headerTypes = targets.searchHeaderTaps.map { it.headerClass }.distinct()
+        if (headerTypes.isEmpty()) return null
+        return runCatching {
+            val atClass = Class.forName("android.app.ActivityThread")
+            val thread = Reflect.callStaticMethod(atClass, "currentActivityThread")
+            val roots = mutableListOf<Any>()
+            (Reflect.getObjectField(thread, "mActivities") as? Map<*, *>)?.values?.forEach { record ->
+                Reflect.getObjectField(record, "activity")?.let { roots.add(it) }
+            }
+            (Reflect.getObjectField(thread, "mServices") as? Map<*, *>)?.values?.forEach { record ->
+                Reflect.getObjectField(record, "service")?.let { roots.add(it) }
+            }
+            Reflect.callStaticMethod(atClass, "currentApplication")?.let { roots.add(it) }
+            for (root in roots) {
+                for (headerType in headerTypes) {
+                    scanForHeaderInstance(root, headerType, depth = 0, maxDepth = 9)?.let { header ->
+                        cacheRekFromQhf(header)?.let { rek ->
+                            ModuleLog.maps(
+                                "MAPS-000",
+                                "discovered rek via ${headerType.simpleName} instance",
+                                always = true
+                            )
+                            return rek
+                        }
+                    }
+                }
+            }
+            null
+        }.getOrNull()
+    }
+
+    private fun scanForHeaderInstance(obj: Any, headerType: Class<*>, depth: Int, maxDepth: Int): Any? {
+        if (depth > maxDepth) return null
+        if (headerType.isInstance(obj)) return obj
+        if (obj is View) return null
+        for (field in obj.javaClass.declaredFields) {
+            if (Modifier.isStatic(field.modifiers) || field.type.isPrimitive) continue
+            if (View::class.java.isAssignableFrom(field.type)) continue
+            runCatching {
+                field.isAccessible = true
+                val value = field.get(obj) ?: return@runCatching
+                scanForHeaderInstance(value, headerType, depth + 1, maxDepth)?.let { return it }
+            }
         }
         return null
     }
@@ -1017,17 +1077,20 @@ object MapsHooks {
      */
     private fun tryStockSearchTapPath(bindOnly: Boolean): Boolean {
         val header = discoverSearchHeaderFromActivities() ?: return false
-        val tap = targets.searchHeaderTaps.firstOrNull { it.headerClass == header.javaClass }
-            ?: targets.searchHeaderTaps.firstOrNull()
+        val tap = selectSearchHeaderTap(header)
         val tapName = tap?.tapMethod?.name ?: "l"
         return runCatching {
             ModuleLog.maps("MAPS-001", "reflective ${header.javaClass.simpleName}.$tapName() search tap", always = true)
+            tap?.rekFieldName?.let { fieldName ->
+                runCatching { Reflect.getObjectField(header, fieldName) }.getOrNull()?.let { opener ->
+                    openNativeKeyboard(opener, showCarImeOverlay = !bindOnly)
+                    return true
+                }
+            }
             Reflect.callMethod(header, tapName)
             val rek = cacheRekFromHeader(header) ?: resolveRek()
             if (rek == null) return false
-            if (!bindOnly) {
-                scheduleShowCarIme(rek)
-            }
+            openNativeKeyboard(rek, showCarImeOverlay = !bindOnly)
             true
         }.getOrElse {
             ModuleLog.maps("MAPS-004", "reflective search tap failed: ${it.message}", always = true)
@@ -1035,14 +1098,43 @@ object MapsHooks {
         }
     }
 
+    private fun selectSearchHeaderTap(header: Any): MapsSignatureDiscovery.SearchHeaderTap? {
+        val uiStateTypes = targets.uiStateTypes.toSet()
+        if (uiStateTypes.isNotEmpty()) {
+            targets.searchHeaderTaps.firstOrNull { tap ->
+                tap.headerClass.isInstance(header) &&
+                    (tap.headerClass.declaredConstructors.any { ctor ->
+                        ctor.parameterTypes.any { it in uiStateTypes }
+                    } || header.javaClass.declaredMethods.any { method ->
+                        method.parameterCount == 0 && method.returnType in uiStateTypes
+                    })
+            }?.let { return it }
+        }
+        return targets.searchHeaderTaps.firstOrNull { it.headerClass.isInstance(header) }
+            ?: targets.searchHeaderTaps.firstOrNull()
+    }
+
     private fun discoverSearchHeaderFromActivities(): Any? {
         runCatching {
             val atClass = Class.forName("android.app.ActivityThread")
             val thread = Reflect.callStaticMethod(atClass, "currentActivityThread")
-            val activities = Reflect.getObjectField(thread, "mActivities") as? Map<*, *> ?: return null
+            val activities = Reflect.getObjectField(thread, "mActivities") as? Map<*, *> ?: emptyMap<Any, Any>()
             for (record in activities.values) {
                 val activity = Reflect.getObjectField(record, "activity") ?: continue
                 discoverQhfHeader(activity)?.let { return it }
+            }
+            val services = Reflect.getObjectField(thread, "mServices") as? Map<*, *> ?: emptyMap<Any, Any>()
+            for (record in services.values) {
+                val service = Reflect.getObjectField(record, "service") ?: continue
+                discoverQhfHeader(service)?.let { return it }
+            }
+            if (::targets.isInitialized) {
+                val app = Reflect.callStaticMethod(atClass, "currentApplication")
+                if (app != null) {
+                    for (tap in targets.searchHeaderTaps) {
+                        scanForHeaderInstance(app, tap.headerClass, depth = 0, maxDepth = 9)?.let { return it }
+                    }
+                }
             }
         }
         return null
@@ -1077,7 +1169,7 @@ object MapsHooks {
     private fun cacheRekFromQhf(header: Any): Any? = cacheRekFromHeader(header)
 
     private fun isRekLikeType(type: Class<*>): Boolean =
-        MapsSignatureDiscovery.isRekOverlayType(type) || MapsInstallProbe.isRekLikeType(type)
+        MapsSignatureDiscovery.isRekFieldType(type)
 
     private fun isRekLike(obj: Any): Boolean = isRekLikeType(obj.javaClass)
 

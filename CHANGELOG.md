@@ -4,6 +4,31 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [2.1.3] - 2026-07-31
+
+Maps car-search keyboard on AA **17.4** / Maps **26.31**: fix Gearhead→Maps fallback and `rlr` opener discovery.
+
+### Fixed
+
+- Maps ignored `OPEN_MAPS_NATIVE_IME` / `PREPARE_MAPS_NATIVE_IME` broadcasts when GhostActivity lifecycle counters lagged — receiver no longer gated on `hooksActive()`
+- Projected IME fallback no longer instantiates detached `xbk` fragments (`factory.d` InvocationTargetException) — uses live IME service fragment (`f()` / discovered factory)
+- Maps rek discovery treats **`rlr`** keyboard opener fields (26.31 `qoq.b`) same as rek overlays; stock tap path prefers `qoq` header
+- AA **17.4** virtual-device path: rek/header discovery scans all activities and services (not only GhostActivity); broadcast sets projected-keyboard flag for behavioral hooks
+
+## [2.1.2] - 2026-07-31
+
+Bugfix for Android Auto **17.4** + Maps **26.31**: keyboard unlock works again after R8 remaps broke Gearhead discovery and Maps UiState/header anchors.
+
+### Fixed
+
+- External AA apps showing **"Park to use keyboard"** — Gearhead discovery now targets `qqe` sensor callbacks (`lic`/`lhs`), `lib`/`lhi` location/parking, `qfx` demand open, `kxp` voice, and `xba` IME fragments (support-v4 Fragment)
+- Maps car search **voice-only / no QWERTY** — UiState discovery via `qok` shape-validated fallback, full-dex string anchors (`UiState(searchQuery=`), and `qoq` header with `rlr` keyboard opener field
+- Dex string-anchor scan returning zero UiState candidates when restriction strings live far from type descriptors in secondary dex
+
+### Changed
+
+- **`DiscoveryCache` schema v7** — forces fresh Gearhead/Maps discovery after 17.4/26.31 anchor updates
+
 ## [2.1.1] - 2026-07-25
 
 Bugfix for Maps **26.30** on Android Auto **17.3**: starting navigation no longer crashes after unlocking the car keyboard.

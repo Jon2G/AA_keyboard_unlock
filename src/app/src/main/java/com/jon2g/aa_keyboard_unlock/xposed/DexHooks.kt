@@ -29,24 +29,16 @@ object DexHooks {
                     val bytes = zip.getInputStream(zip.getEntry(dexName)).readBytes()
                     // Latin-1 keeps a 1:1 byte↔char map so ASCII needles match in binary dex.
                     val text = bytes.toString(Charsets.ISO_8859_1)
-                    for (needle in needles) {
-                        var from = 0
-                        while (hits.size < limit) {
-                            val idx = text.indexOf(needle, from)
-                            if (idx < 0) break
-                            val start = (idx - 4000).coerceAtLeast(0)
-                            val end = (idx + needle.length + 4000).coerceAtMost(text.length)
-                            val window = text.substring(start, end)
-                            Regex("""L(?:defpackage/)?([a-z]{2,5});""")
-                                .findAll(window)
-                                .map { it.groupValues[1] }
-                                .distinct()
-                                .forEach { shortName ->
-                                    if (hits.size >= limit) return hits
-                                    hits += "defpackage.$shortName" to needle
-                                }
-                            from = idx + needle.length
-                        }
+                    val matchedNeedles = needles.filter { text.contains(it) }
+                    if (matchedNeedles.isEmpty()) continue
+                    // UiState toString constants often sit far from type descriptors in secondary dex;
+                    // when a needle is present anywhere in the blob, enumerate obfuscated classes from
+                    // the whole dex and let callers validate by API shape.
+                    val classPattern = Regex("""L(?:defpackage/)?([a-z]{2,5});""")
+                    for (match in classPattern.findAll(text)) {
+                        if (hits.size >= limit) return hits
+                        val shortName = match.groupValues[1]
+                        hits += "defpackage.$shortName" to matchedNeedles.first()
                     }
                 }
             }

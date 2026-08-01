@@ -101,5 +101,6 @@ if $INSTALL; then
   echo ""
   echo "Installing on connected device..."
   "$ROOT/scripts/install-apk.sh" "$APK"
+  "$ROOT/scripts/post-debug-install.sh"
   echo "Installed com.jon2g.aa_keyboard_unlock (debug)"
 fi
